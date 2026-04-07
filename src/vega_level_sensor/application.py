@@ -1,55 +1,120 @@
 import logging
 import time
 
-from pydoover.docker import Application
 from pydoover import ui
+from pydoover.docker import Application
 
 from .app_config import VegaLevelSensorConfig
+from .app_tags import VegaLevelSensorTags
 from .app_ui import VegaLevelSensorUI
 from .app_state import VegaLevelSensorState
+from .record import Record
+
 
 log = logging.getLogger()
 
+START_REG_NUM = 100
+NUM_REGS = 18
+REGISTER_TYPE = 3
+
+
 class VegaLevelSensorApplication(Application):
-    config: VegaLevelSensorConfig  # not necessary, but helps your IDE provide autocomplete!
+    config: VegaLevelSensorConfig
+    tags: VegaLevelSensorTags
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.started: float = time.time()
-        self.ui: VegaLevelSensorUI = None
-        self.state: VegaLevelSensorState = None
+    config_cls = VegaLevelSensorConfig
+    tags_cls = VegaLevelSensorTags
+    ui_cls = VegaLevelSensorUI
 
     async def setup(self):
-        self.ui = VegaLevelSensorUI()
         self.state = VegaLevelSensorState()
-        self.ui_manager.add_children(*self.ui.fetch())
+        self.last_record: Record | None = None
+        self.last_request_time: float = 0
+        self.min_request_interval = 5
 
     async def main_loop(self):
-        log.info(f"State is: {self.state.state}")
+        await self._send_request()
+        await self.state.spin()
 
-        # a random value we set inside our simulator. Go check it out in simulators/sample!
-        random_value = self.get_tag("random_value", self.config.sim_app_key.value)
-        log.info("Random value from simulator: %s", random_value)
+        if self.state.state == "no_comms":
+            log.warning("No comms, clearing last record")
+            self.last_record = None
+            await self._clear_display_tags()
+        else:
+            await self._update_display_tags()
 
-        self.ui.update(
-            True,
-            random_value,
-            time.time() - self.started,
+    async def _update_display_tags(self):
+        if self.last_record is None:
+            return
+
+        show_volume = len(self.config.storage_curve.elements) > 0
+        if show_volume:
+            await self.tags.last_volume.set(self.last_record.output_volume)
+        else:
+            await self.tags.last_volume.set(self.last_record.level_percentage)
+
+        await self.tags.last_rl.set(self.last_record.rl_reading)
+        await self.tags.time_last_update.set(int(time.time() - self.last_record.ts))
+        await self.tags.last_raw_distance.set(self.last_record.sensor_distance)
+        await self.tags.last_reliability.set(self.last_record.measurement_reliability)
+
+        # Update event volume if active
+        if self.tags.event_active.value:
+            initial = self.tags.event_initial_volume.value
+            current = self.last_record.output_volume
+            if initial is not None and current is not None:
+                await self.tags.event_volume.set(current - initial)
+            elif current is not None:
+                await self.tags.event_volume.set(current)
+
+    async def _clear_display_tags(self):
+        await self.tags.last_volume.set(None)
+        await self.tags.last_rl.set(None)
+        await self.tags.time_last_update.set(None)
+        await self.tags.last_raw_distance.set(None)
+        await self.tags.last_reliability.set(None)
+
+    async def _send_request(self):
+        if time.time() - self.last_request_time < self.min_request_interval:
+            return
+
+        result = await self.modbus_iface.read_registers_async(
+            bus_id=self.config.modbus_config.name.value,
+            modbus_id=int(self.config.modbus_id.value),
+            start_address=START_REG_NUM,
+            num_registers=NUM_REGS,
+            register_type=REGISTER_TYPE,
         )
+        if not result:
+            log.info("Failed to send modbus request")
+            await self.state.register_no_comms()
+            return
 
-    @ui.callback("send_alert")
-    async def on_send_alert(self, new_value):
-        log.info(f"Sending alert: {self.ui.test_output.current_value}")
-        await self.publish_to_channel("significantAlerts", self.ui.test_output.current_value)
-        self.ui.send_alert.coerce(None)
+        self.last_record = Record(result, self.config)
+        await self.state.register_comms()
+        self.last_request_time = time.time()
 
-    @ui.callback("test_message")
-    async def on_text_parameter_change(self, new_value):
-        log.info(f"New value for test message: {new_value}")
-        # Set the value as an output to the corresponding variable is this case
-        self.ui.test_output.update(new_value)
+    # --- UI Handlers ---
 
-    @ui.callback("charge_mode")
-    async def on_state_command(self, new_value):
-        log.info(f"New value for state command: {new_value}")
+    @ui.handler("start_event")
+    async def on_start_event(self, ctx, value):
+        log.info("Starting event")
+        if not self.tags.event_active.value:
+            initial = self.last_record.output_volume if self.last_record else None
+            await self.tags.event_active.set(True)
+            await self.tags.event_initial_volume.set(initial)
+            await self.tags.event_started_at.set(time.time())
+            await self.tags.start_event_hidden.set(True)
+            await self.tags.stop_event_hidden.set(False)
+
+    @ui.handler("stop_event")
+    async def on_stop_event(self, ctx, value):
+        log.info("Stopping event")
+        if self.tags.event_active.value:
+            await self.tags.event_active.set(False)
+
+        await self.tags.start_event_hidden.set(False)
+        await self.tags.stop_event_hidden.set(True)
+        await self.tags.event_volume.set(None)
+        await self.tags.event_initial_volume.set(None)
+        await self.tags.event_started_at.set(None)

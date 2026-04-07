@@ -1,18 +1,32 @@
 from pathlib import Path
 
 from pydoover import config
+from pydoover.config import ApplicationPosition
+from pydoover.docker.modbus import ModbusConfig
+
+
+class StorageCurvePoint(config.Object):
+    level = config.Number("Level", description="Level / depth in metres")
+    volume = config.Number("Volume", description="Volume in megs")
 
 
 class VegaLevelSensorConfig(config.Schema):
-    def __init__(self):
-        self.outputs_enabled = config.Boolean("Digital Outputs Enabled", default=True)
-        self.funny_message = config.String("A Funny Message")  # this will be required as no default given.
+    sensor_rl = config.Number("Sensor RL", description="Sensor reference level in metres")
+    full_rl = config.Number("Full RL", description="Full tank reference level in metres")
+    empty_rl = config.Number("Empty RL", description="Empty tank reference level in metres")
+    modbus_id = config.Integer("Modbus ID", description="Modbus ID for the sensor")
 
-        self.sim_app_key = config.Application("Simulator App Key", description="The app key for the simulator")
+    storage_curve = config.Array(
+        "Storage Curve",
+        element=StorageCurvePoint("Storage Curve Point"),
+    )
+
+    modbus_config = ModbusConfig()
+    position = ApplicationPosition()
 
 
 def export():
-    VegaLevelSensorConfig().export(Path(__file__).parents[2] / "doover_config.json", "vega_level_sensor")
-
-if __name__ == "__main__":
-    export()
+    VegaLevelSensorConfig.export(
+        Path(__file__).parents[2] / "doover_config.json",
+        "vega_level_sensor",
+    )

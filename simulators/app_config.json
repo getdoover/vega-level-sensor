@@ -1,6 +1,17 @@
 {
-    "simulator_app_key": "sim_app_key",
-    "digital_input_count": 1,
-    "digital_output_count": 2,
-    "a_funny_message": "yeeha"
+    "sensor_rl": 15.0,
+    "full_rl": 12.0,
+    "empty_rl": 5.0,
+    "modbus_id": 1,
+    "storage_curve": [
+        {"level": 0, "volume": 0},
+        {"level": 3.5, "volume": 50},
+        {"level": 7.0, "volume": 150}
+    ],
+    "modbus_config": {
+        "name": "default",
+        "bus_type": "tcp",
+        "tcp_uri": "127.0.0.1:5020",
+        "tcp_timeout": 1
+    }
 }

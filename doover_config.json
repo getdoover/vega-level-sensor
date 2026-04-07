@@ -1,5 +1,6 @@
 {
     "vega_level_sensor": {
+        "id": "144019800371283464",
         "name": "vega_level_sensor",
         "display_name": "Vega Level Sensor",
         "type": "DEV",
@@ -8,9 +9,9 @@
         "description": "Monitor level and flow with a digital Vega level sensor.",
         "long_description": "README.md",
         "depends_on": [],
-        "owner_org_key": "FIX-ME",
+        "organisation_id": null,
         "image_name": "ghcr.io/getdoover/vega-level-sensor:main",
-        "container_registry_profile_key": "FIX-ME",
+        "container_registry_profile_id": "93955828574386692",
         "build_args": "--platform linux/amd64,linux/arm64",
         "config_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -45,7 +46,6 @@
                 "a_funny_message",
                 "simulator_app_key"
             ]
-        },
-        "organisation_id": "FIX-ME"
+        }
     }
 }

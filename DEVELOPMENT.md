@@ -1,81 +1,118 @@
-# Doover Application Template
+# Vega Level Sensor -- Development Guide
 
-This repository serves as a template for creating Doover applications.
+## Repository Structure
 
-It provides a structured layout for application code, deployment configurations, simulators, and tests. The template is
-designed to simplify the development and deployment of Doover-compatible applications.
+```
+README.md                   <-- User-facing app description
+DEVELOPMENT.md              <-- This file
+pyproject.toml              <-- Python project config and dependencies
+Dockerfile                  <-- Production Docker image
+doover_config.json          <-- Doover platform metadata (generated)
 
-The basic structure of the repository is as follows:
+src/vega_level_sensor/
+  __init__.py               <-- Entry point (main function)
+  application.py            <-- Core application logic and event handlers
+  app_config.py             <-- Configuration schema (sensor RL, storage curve, etc.)
+  app_tags.py               <-- Declarative tags (display state, event tracking)
+  app_ui.py                 <-- UI definition (level gauge, event buttons, sensor details)
+  app_state.py              <-- State machine (comms / maybe_no_comms / no_comms)
+  record.py                 <-- Modbus register parser + storage curve interpolation
+
+simulators/
+  app_config.json           <-- Sample config for local development
+  docker-compose.yml        <-- Orchestrates device agent, modbus interface, simulator, and app
+  vega_sim/
+    main.py                 <-- Modbus TCP server emulating a Vega sensor
+    pyproject.toml          <-- Simulator dependencies
+    Dockerfile              <-- Simulator Docker image
+
+tests/
+  test_imports.py           <-- Import and basic validation tests
+```
+
+## Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) package manager
+- Docker and Docker Compose (for simulator and deployment)
 
 ## Getting Started
 
-```
-README.md           <-- App description
-DEVELOPMENT.md      <-- This file
-pyproject.toml      <-- Python project configuration file (including dependencies)
-Dockerfile          <-- Dockerfile for building the application image
-doover_config.json  <-- Configuration file for doover
-
-src/app_template/   <-- Application directory
-  application.py    <-- Main application code
-  app_config.py     <-- Config schema definition
-  app_ui.py         <-- UI code (if applicable)
-  app_state.py      <-- State machine (if applicable)
-
-simulator/
-  app_config.json   <-- Sample configuration for the simulator
-  docker-compose.yml <-- Docker Compose file for the simulator
-  
-tests/
-    test_imports.py  <-- Test file for the application
-```
-
-The `doover_config.json` file is the doover configuration file for the application. 
-
-It defines all metadata about the application, including name, short and long description, 
-dependent apps, image name, owner organisation, container registry and more.
-
-### Prerequisites
-
-- Docker and Docker Compose installed
-- Python 3.11 or later (if running locally)
-- Pipenv for managing Python dependencies
-
-### Running Locally
-
-1. Run the application:
+### Install dependencies
 
 ```bash
-doover app run
+uv sync
 ```
 
-## Simulators
-
-The `simulator/` directory contains tools for simulating application behavior. For example:
-
-- `app_config.json`: Sample configuration file for the app.
-- `docker-compose.yml`: Defines services for running the application.
-
-You can find a sample simulator in the `simulator/sample/` directory. While it is fairly bare-bones, it shows
-positioning of the simulator in the application structure, and how to start the simulator alongside your application.
-
-## Testing
-
-Run the tests using the following command:
+### Run locally (with simulator)
 
 ```bash
-pytest tests/
+cd simulators
+docker compose up --build
 ```
 
-## Deployment
+This starts four services:
 
-The `deployment/` directory contains deployment configurations, including a `docker-compose.yml` file for orchestrating
-services.
+| Service | Description |
+|---------|-------------|
+| `device_agent` | Doover device agent |
+| `modbus_iface` | Modbus RTU/TCP bridge |
+| `vega_sim` | Vega sensor simulator (TCP on port 5020, oscillating distance) |
+| `application` | This app, reading from the simulator |
 
-## Customization
+### Run tests
 
-To create your own Doover application:
+```bash
+uv run pytest tests/
+```
 
-1. Modify the application logic in the appropriate directory.
-2. Update the simulator and test configurations as needed.
-3. Adjust deployment configurations to suit your requirements.
+## Architecture
+
+### Data Flow
+
+```
+Vega Sensor  -->  Modbus (RTU/TCP)  -->  modbus_iface  -->  Application  -->  Doover Platform
+                                                               |
+                                                               +--> Tags (display state)
+                                                               +--> Channels (event reports)
+                                                               +--> UI (dashboard)
+```
+
+### Modbus Registers
+
+The app reads 18 holding registers (type 3) starting at register 100.
+
+| Register (offset) | Description | Format |
+|-------------------|-------------|--------|
+| 10-11 | Sensor distance | Little-endian float32 (metres) |
+| 14-15 | Measurement reliability | Little-endian float32 (dB) |
+
+### State Machine (Comms Tracking)
+
+| State | Description | Timeout |
+|-------|-------------|---------|
+| `no_comms` | No communication with sensor (initial state) | -- |
+| `comms` | Active communication | -- |
+| `maybe_no_comms` | Failed read, waiting to confirm loss | 2 min |
+
+Successful read transitions to `comms`. Failed read from `comms` transitions to `maybe_no_comms`. After 2 minutes without recovery, transitions to `no_comms` and clears display.
+
+### Storage Curve
+
+The storage curve maps water depth (metres) to volume (megs) using linear interpolation. Configure it as an array of `{level, volume}` points in the config. If no curve is configured, the UI shows level as a percentage instead.
+
+### Event Tracking
+
+Users can start/stop events via UI buttons. Starting an event records the initial volume. Stopping publishes a report request to the `report_requests` channel with `period_from`, `period_to`, and `timezone`.
+
+## Regenerating doover_config.json
+
+```bash
+uv run export-config
+```
+
+## Building the Docker Image
+
+```bash
+docker build -t vega-level-sensor .
+```

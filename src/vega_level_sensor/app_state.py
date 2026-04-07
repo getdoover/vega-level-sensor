@@ -2,19 +2,30 @@ import logging
 
 from pydoover.state import StateMachine
 
+TIME_TILL_DROPOUT = 60 * 2  # 2 minutes
+
 log = logging.getLogger(__name__)
+
 
 class VegaLevelSensorState:
     state: str
 
     states = [
-        {"name": "off", "timeout": 5, "on_timeout": "set_on"},
-        {"name": "on", "timeout": 5, "on_timeout": "set_off"},
+        {"name": "initial"},
+        {"name": "comms"},
+        {
+            "name": "maybe_no_comms",
+            "timeout": TIME_TILL_DROPOUT,
+            "on_timeout": "lost_comms",
+        },
+        {"name": "no_comms"},
     ]
 
     transitions = [
-        {"trigger": "set_on", "source": "off", "dest": "on"},
-        {"trigger": "set_off", "source": "on", "dest": "off"},
+        {"trigger": "initialise", "source": "initial", "dest": "no_comms"},
+        {"trigger": "got_comms", "source": ["comms", "maybe_no_comms", "no_comms"], "dest": "comms"},
+        {"trigger": "maybe_lost_comms", "source": "comms", "dest": "maybe_no_comms"},
+        {"trigger": "lost_comms", "source": "maybe_no_comms", "dest": "no_comms"},
     ]
 
     def __init__(self):
@@ -22,19 +33,17 @@ class VegaLevelSensorState:
             states=self.states,
             transitions=self.transitions,
             model=self,
-            initial="warning_disabled",
+            initial="no_comms",
             queued=True,
         )
 
-    async def on_enter_off(self):
-        log.info("State changed to off!")
+    async def spin(self):
+        if self.state == "initial":
+            await self.initialise()
 
-    async def on_enter_on(self):
-        log.info("State changed to on!")
+    async def register_comms(self):
+        await self.got_comms()
 
-    # typehints for trigger methods
-    # async def enable_warning(self): ...
-    # async def disable_warning(self): ...
-    # async def start_horn_cycle(self): ...
-    # async def set_horn_on(self): ...
-    # async def set_horn_off(self): ...
+    async def register_no_comms(self):
+        if self.state == "comms":
+            await self.maybe_lost_comms()

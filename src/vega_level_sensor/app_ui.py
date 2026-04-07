@@ -1,36 +1,103 @@
 from pydoover import ui
 
+from .app_config import VegaLevelSensorConfig
+from .app_tags import VegaLevelSensorTags
+from .record import get_volume
 
-class VegaLevelSensorUI:
-    def __init__(self):
-        self.is_working = ui.BooleanVariable("is_working", "We Working?")
-        self.uptime = ui.DateTimeVariable("uptime", "Started")
 
-        self.send_alert = ui.Action("send_alert", "Send message as alert", position=1)
-        self.text_parameter = ui.TextParameter("test_message", "Put in a message")
+class VegaLevelSensorUI(ui.UI):
+    config: VegaLevelSensorConfig
 
-        self.test_output = ui.TextVariable("test_output", "This is message we got")
+    last_volume = ui.NumericVariable(
+        "Volume",
+        units="megs",
+        value=VegaLevelSensorTags.last_volume,
+        precision=0,
+        form=ui.Widget.radial,
+        ranges=[
+            ui.Range("Low", 0, 40, colour=ui.Colour.yellow),
+            ui.Range("Half", 40, 80, colour=ui.Colour.blue),
+            ui.Range("Full", 80, 100, colour=ui.Colour.green),
+        ],
+    )
 
-        self.battery = ui.Submodule("battery", "Battery Module")
-        self.battery_voltage = ui.NumericVariable(
-            "voltage", "Battery Voltage", precision=2, ranges=[
-                ui.Range("Low", 0, 10, ui.Colour.red),
-                ui.Range("Normal", 10, 20, ui.Colour.green),
-                ui.Range("High", 20, 30, ui.Colour.blue),
-            ])
+    last_level = ui.NumericVariable(
+        "Level",
+        units="%",
+        value=VegaLevelSensorTags.last_volume,
+        precision=0,
+        form=ui.Widget.radial,
+    )
 
-        self.battery_low_voltage_alert = ui.NumericParameter("low_voltage_alert", "Low Voltage Alert")
-        self.battery_charge_mode = ui.StateCommand("charge_mode", "Charge Mode", user_options=[
-            ui.Option("charge", "Charge"),
-            ui.Option("discharge", "Discharge"),
-            ui.Option("idle", "Idle")
-        ])
-        self.battery.add_children(self.battery_voltage, self.battery_low_voltage_alert, self.battery_charge_mode)
+    last_rl = ui.NumericVariable(
+        "Water RL",
+        units="m",
+        value=VegaLevelSensorTags.last_rl,
+        precision=3,
+    )
 
-    def fetch(self):
-        return self.is_working, self.uptime, self.send_alert, self.text_parameter, self.test_output, self.battery
+    start_event = ui.Button(
+        "Start Event",
+        hidden=VegaLevelSensorTags.start_event_hidden,
+    )
 
-    def update(self, is_working, voltage, uptime):
-        self.is_working.update(is_working)
-        self.uptime.update(uptime)
-        self.battery_voltage.update(voltage)
+    stop_event = ui.Button(
+        "Stop Event",
+        hidden=VegaLevelSensorTags.stop_event_hidden,
+    )
+
+    event_volume = ui.NumericVariable(
+        "Event Volume",
+        units="ML",
+        value=VegaLevelSensorTags.event_volume,
+        precision=2,
+        hidden=VegaLevelSensorTags.stop_event_hidden,
+    )
+
+    time_last_update = ui.Timestamp(
+        "Time Since Last Read",
+        value=VegaLevelSensorTags.time_last_update,
+    )
+
+    sensor_details = ui.Submodule(
+        "Sensor Details",
+        children=[
+            ui.NumericVariable(
+                "Sensor Distance",
+                units="m",
+                value=VegaLevelSensorTags.last_raw_distance,
+                precision=3,
+            ),
+            ui.NumericVariable(
+                "Measurement Reliability",
+                units="dB",
+                value=VegaLevelSensorTags.last_reliability,
+                precision=1,
+                ranges=[
+                    ui.Range("Bad", 0, 20, colour=ui.Colour.yellow),
+                    ui.Range("Good", 20, 100, colour=ui.Colour.green),
+                ],
+            ),
+        ],
+        is_collapsed=True,
+    )
+
+    async def setup(self):
+        storage_curve = self.config.storage_curve.elements
+        show_volume = len(storage_curve) > 0
+
+        if show_volume:
+            max_depth = self.config.full_rl.value - self.config.empty_rl.value
+            min_vol = get_volume(0, storage_curve)
+            low_vol = get_volume(max_depth * 0.4, storage_curve)
+            high_vol = get_volume(max_depth * 0.8, storage_curve)
+            max_vol = get_volume(max_depth, storage_curve)
+
+            self.last_volume.ranges = [
+                ui.Range("Low", min_vol, low_vol, colour=ui.Colour.yellow),
+                ui.Range("Half", low_vol, high_vol, colour=ui.Colour.blue),
+                ui.Range("Full", high_vol, max_vol, colour=ui.Colour.green),
+            ]
+            self.last_level.hidden = True
+        else:
+            self.last_volume.hidden = True
