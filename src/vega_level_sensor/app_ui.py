@@ -1,4 +1,5 @@
 from pydoover import ui
+from pydoover.ui import Colour
 
 from .app_config import VegaLevelSensorConfig
 from .app_tags import VegaLevelSensorTags
@@ -36,16 +37,6 @@ class VegaLevelSensorUI(ui.UI):
         precision=3,
     )
 
-    start_event = ui.Button(
-        "Start Event",
-        hidden=VegaLevelSensorTags.start_event_hidden,
-    )
-
-    stop_event = ui.Button(
-        "Stop Event",
-        hidden=VegaLevelSensorTags.stop_event_hidden,
-    )
-
     event_volume = ui.NumericVariable(
         "Event Volume",
         units="ML",
@@ -55,8 +46,20 @@ class VegaLevelSensorUI(ui.UI):
     )
 
     time_last_update = ui.Timestamp(
-        "Time Since Last Read",
+        "Last Read",
         value=VegaLevelSensorTags.time_last_update,
+    )
+
+    start_event = ui.Button(
+        "Start Event",
+        hidden=VegaLevelSensorTags.start_event_hidden,
+        colour=Colour.blue,
+    )
+
+    stop_event = ui.Button(
+        "Stop Event",
+        hidden=VegaLevelSensorTags.stop_event_hidden,
+        colour=Colour.red,
     )
 
     sensor_details = ui.Submodule(
@@ -80,6 +83,12 @@ class VegaLevelSensorUI(ui.UI):
             ),
         ],
         is_collapsed=True,
+    )
+
+    warning = ui.WarningIndicator(
+        name="warning_indicator",
+        display_name=VegaLevelSensorTags.warning_name,
+        hidden=VegaLevelSensorTags.warning_hidden,
     )
 
     async def setup(self):

@@ -2,6 +2,7 @@ import logging
 import time
 
 from pydoover import ui
+from pydoover.rpc import RPCError
 from pydoover.docker import Application
 
 from .app_config import VegaLevelSensorConfig
@@ -54,9 +55,12 @@ class VegaLevelSensorApplication(Application):
             await self.tags.last_volume.set(self.last_record.level_percentage)
 
         await self.tags.last_rl.set(self.last_record.rl_reading)
-        await self.tags.time_last_update.set(int(time.time() - self.last_record.ts))
+        await self.tags.time_last_update.set(time.time() * 1000.0)
         await self.tags.last_raw_distance.set(self.last_record.sensor_distance)
         await self.tags.last_reliability.set(self.last_record.measurement_reliability)
+
+        await self.tags.warning_name.set(None)
+        await self.tags.warning_hidden.set(True)
 
         # Update event volume if active
         if self.tags.event_active.value:
@@ -68,6 +72,9 @@ class VegaLevelSensorApplication(Application):
                 await self.tags.event_volume.set(current)
 
     async def _clear_display_tags(self):
+        await self.tags.warning_name.set("No Connection")
+        await self.tags.warning_hidden.set(False)
+
         await self.tags.last_volume.set(None)
         await self.tags.last_rl.set(None)
         await self.tags.time_last_update.set(None)
@@ -78,15 +85,16 @@ class VegaLevelSensorApplication(Application):
         if time.time() - self.last_request_time < self.min_request_interval:
             return
 
-        result = await self.modbus_iface.read_registers_async(
-            bus_id=self.config.modbus_config.name.value,
-            modbus_id=int(self.config.modbus_id.value),
-            start_address=START_REG_NUM,
-            num_registers=NUM_REGS,
-            register_type=REGISTER_TYPE,
-        )
-        if not result:
-            log.info("Failed to send modbus request")
+        try:
+            result = await self.modbus_iface.read_registers(
+                bus_id=self.config.modbus_config.name.value,
+                modbus_id=int(self.config.modbus_id.value),
+                start_address=START_REG_NUM,
+                num_registers=NUM_REGS,
+                register_type=REGISTER_TYPE,
+            )
+        except Exception as e:
+            log.info(f"Failed to send modbus request: {e}")
             await self.state.register_no_comms()
             return
 
@@ -99,22 +107,33 @@ class VegaLevelSensorApplication(Application):
     @ui.handler("start_event")
     async def on_start_event(self, ctx, value):
         log.info("Starting event")
-        if not self.tags.event_active.value:
-            initial = self.last_record.output_volume if self.last_record else None
-            await self.tags.event_active.set(True)
-            await self.tags.event_initial_volume.set(initial)
-            await self.tags.event_started_at.set(time.time())
-            await self.tags.start_event_hidden.set(True)
-            await self.tags.stop_event_hidden.set(False)
+
+        initial = self.last_record.output_volume if self.last_record else None
+        await self.tags.event_active.set(True)
+        await self.tags.event_initial_volume.set(initial)
+        await self.tags.event_started_at.set(time.time())
+        await self.tags.start_event_hidden.set(True)
+        await self.tags.stop_event_hidden.set(False)
+
+        await self.tag_manager.flush_logs()
+        await self.tag_manager.commit_tags()
+
+        # fixme: this is a bit dumb but buttons are just a bit dumb...
+        await self.ui.start_event.set(None)
+        raise RPCError(1, "test")
 
     @ui.handler("stop_event")
     async def on_stop_event(self, ctx, value):
         log.info("Stopping event")
-        if self.tags.event_active.value:
-            await self.tags.event_active.set(False)
+        await self.tag_manager.flush_logs()
+        await self.tag_manager.commit_tags()
 
+        await self.tags.event_active.set(False)
         await self.tags.start_event_hidden.set(False)
         await self.tags.stop_event_hidden.set(True)
         await self.tags.event_volume.set(None)
         await self.tags.event_initial_volume.set(None)
         await self.tags.event_started_at.set(None)
+
+        await self.ui.stop_event.set(None)
+        raise RPCError(1, "test")

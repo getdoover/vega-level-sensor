@@ -16,3 +16,6 @@ class VegaLevelSensorTags(Tags):
     event_volume = Tag("number", default=None)
     start_event_hidden = Tag("boolean", default=False)
     stop_event_hidden = Tag("boolean", default=True)
+
+    warning_name = Tag("string")
+    warning_hidden = Tag("boolean", default=True)
