@@ -118,10 +118,6 @@ class VegaLevelSensorApplication(Application):
         await self.tag_manager.flush_logs()
         await self.tag_manager.commit_tags()
 
-        # fixme: this is a bit dumb but buttons are just a bit dumb...
-        await self.ui.start_event.set(None)
-        raise RPCError(1, "test")
-
     @ui.handler("stop_event")
     async def on_stop_event(self, ctx, value):
         log.info("Stopping event")
@@ -134,6 +130,3 @@ class VegaLevelSensorApplication(Application):
         await self.tags.event_volume.set(None)
         await self.tags.event_initial_volume.set(None)
         await self.tags.event_started_at.set(None)
-
-        await self.ui.stop_event.set(None)
-        raise RPCError(1, "test")
