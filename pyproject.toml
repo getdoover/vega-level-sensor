@@ -5,7 +5,7 @@ description = "Doover application for monitoring water level with Vega level sen
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pydoover==1.0.0a6",
+    "pydoover>=1.0.0a6",
     "transitions>=0.9.2",
 ]
 
@@ -26,6 +26,3 @@ dev = [
     "protobuf==5.28.2",
     "pytest-asyncio>=0.26.0",
 ]
-
-[tool.uv.sources]
-pydoover = { git = "https://github.com/getdoover/pydoover" }

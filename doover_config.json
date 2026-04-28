@@ -1,6 +1,6 @@
 {
     "vega_level_sensor": {
-        "id": "144019800371283464",
+        "id": 144019800371283464,
         "name": "vega_level_sensor",
         "display_name": "Vega Level Sensor",
         "type": "DEV",
@@ -15,9 +15,13 @@
         ],
         "organisation_id": null,
         "image_name": "ghcr.io/getdoover/vega-level-sensor:main",
-        "container_registry_profile_id": "93955828574386692",
+        "container_registry_profile_id": 93955828574386692,
         "build_args": "--platform linux/amd64,linux/arm64",
         "export_ui_command": "NO_EXPORT",
+        "staging_config": {
+            "container_registry_profile_id": "7369503425484439552",
+            "id": 170664422157625614
+        },
         "config_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": "",
@@ -287,6 +291,17 @@
                 "storage_curve",
                 "modbus_config"
             ]
-        }
+        },
+        "key": null,
+        "owner_org_id": null,
+        "code_repo_id": null,
+        "repo_branch": "main",
+        "lambda_config": null,
+        "ui_schema": null,
+        "banner_url": null,
+        "build_widget_command": null,
+        "export_config_command": null,
+        "run_command": null,
+        "lambda_arn": null
     }
 }
