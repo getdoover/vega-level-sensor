@@ -74,10 +74,13 @@ class Record:
         return self.config.sensor_rl.value - self.sensor_distance
 
     @property
-    def level_percentage(self) -> float:
+    def level_percentage(self) -> float | None:
         """Level as a percentage of tank capacity."""
         reading = self.rl_reading - self.config.empty_rl.value
         sensor_range = self.config.full_rl.value - self.config.empty_rl.value
+        if sensor_range == 0:
+            log.warning("Cannot compute level_percentage: full_rl and empty_rl are equal (check config)")
+            return None
         return (reading / sensor_range) * 100
 
     @property
