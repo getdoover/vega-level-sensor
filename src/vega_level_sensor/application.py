@@ -98,6 +98,11 @@ class VegaLevelSensorApplication(Application):
             await self.state.register_no_comms()
             return
 
+        if result is None:
+            log.info("Modbus request returned no data (bus unavailable?)")
+            await self.state.register_no_comms()
+            return
+
         self.last_record = Record(result, self.config)
         await self.state.register_comms()
         self.last_request_time = time.time()
