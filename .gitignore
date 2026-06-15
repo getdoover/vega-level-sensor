@@ -136,6 +136,15 @@ ENV/
 env.bak/
 venv.bak/
 
+# Widget dependencies / build cache
+dashboard-widget/node_modules/
+dashboard-widget/dist/
+
+# Processor publish artifacts
+package.zip
+packages_export/
+requirements.txt
+
 # Spyder project settings
 .spyderproject
 .spyproject

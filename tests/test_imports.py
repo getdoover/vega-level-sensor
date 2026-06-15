@@ -40,3 +40,13 @@ def test_record():
 
     assert Record
     assert get_volume(5.0, []) is None
+
+
+def test_farm_water_dashboard_imports():
+    from farm_water_dashboard.app_config import FarmWaterDashboardConfig
+    from farm_water_dashboard.app_ui import FarmWaterDashboardUI
+    from farm_water_dashboard.application import FarmWaterDashboardApp
+
+    assert isinstance(FarmWaterDashboardConfig.to_schema(), dict)
+    assert FarmWaterDashboardUI
+    assert FarmWaterDashboardApp

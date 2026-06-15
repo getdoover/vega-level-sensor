@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydoover import ui
 from pydoover.ui import Colour
 
@@ -110,3 +112,9 @@ class VegaLevelSensorUI(ui.UI):
             self.last_level.hidden = True
         else:
             self.last_volume.hidden = True
+
+
+def export():
+    VegaLevelSensorUI(None, None, None).export(
+        Path(__file__).parents[2] / "doover_config.json", "vega_level_sensor"
+    )
