@@ -19,11 +19,17 @@
 
 .water-actions,
 .water-range-group,
+.water-panel-controls,
 .water-summary {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.water-panel-controls {
+  gap: 12px;
+  justify-content: flex-end;
 }
 
 .water-header .water-summary {
@@ -72,6 +78,11 @@
 .water-button:hover,
 .water-range-button:hover {
   background: color-mix(in srgb, var(--muted) 75%, transparent);
+}
+
+.water-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .water-range-button[aria-pressed="true"] {
@@ -201,6 +212,48 @@
 .water-device-name strong {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.water-fillbar {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.water-fillbar-track {
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+  border-radius: 999px;
+  flex: 1 1 auto;
+  height: 6px;
+  max-width: 120px;
+  min-width: 48px;
+  overflow: hidden;
+}
+
+.water-fillbar-fill {
+  border-radius: 999px;
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  transition: width 200ms ease;
+}
+
+.water-fillbar-label {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.water-level-cell {
+  white-space: nowrap;
+}
+
+.water-capacity-secondary {
+  color: var(--muted-foreground);
+  font-weight: 400;
   white-space: nowrap;
 }
 

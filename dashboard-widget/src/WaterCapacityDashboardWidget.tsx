@@ -27,6 +27,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -35,6 +36,7 @@ import {
 import {
   ArrowDown,
   ArrowUp,
+  Download,
   ExternalLink,
   Maximize2,
   X,
@@ -45,11 +47,12 @@ dayjs.extend(relativeTime);
 
 const DAY_MS = 86_400_000;
 const DEFAULT_HISTORY_DAYS = 7;
-const MAX_HISTORY_DAYS = 30;
+const MAX_HISTORY_DAYS = 90;
 const FLEET_MSG_CEILING = 50_000;
 const DEFAULT_AGENT_MSG_LIMIT = 500;
 const VEGA_APP_NAME = "vega_level_sensor";
 const VEGA_CAPACITY_TAG = "last_volume";
+const VEGA_FULL_CAPACITY_TAG = "full_volume";
 const STACK_COLORS = [
   "#2563eb",
   "#16a34a",
@@ -66,7 +69,15 @@ const RANGE_OPTIONS = [
   { label: "24h", days: 1 },
   { label: "7d", days: 7 },
   { label: "30d", days: 30 },
+  { label: "90d", days: 90 },
 ];
+
+type ScaleMode = "capacity" | "fit";
+const SCALE_OPTIONS: { label: string; mode: ScaleMode; title: string }[] = [
+  { label: "Capacity", mode: "capacity", title: "Scale the axis to total storage capacity" },
+  { label: "Fit", mode: "fit", title: "Zoom the axis to the stored water level" },
+];
+const DEFAULT_SCALE_MODE: ScaleMode = "capacity";
 
 interface UiRemoteComponentWater {
   app_key: string;
@@ -98,6 +109,12 @@ interface DashboardDeploymentConfig {
 interface TagAggregate {
   data?: Record<string, unknown> | null;
   last_updated?: number | string | null;
+}
+
+interface UiStateData {
+  state?: {
+    children?: Record<string, unknown> | null;
+  } | null;
 }
 
 interface ChannelMessage {
@@ -144,12 +161,13 @@ interface DeviceRow {
   chartColor: string;
   vegaAppKey: string | null;
   capacity: number | null;
+  fullCapacity: number | null;
   lastUpdated: number | null;
   history: CapacityPoint[];
   change: number | null;
 }
 
-type SortKey = "name" | "capacity" | "change" | "lastUpdated";
+type SortKey = "name" | "capacity" | "fullCapacity" | "change" | "lastUpdated";
 type SortDir = "asc" | "desc";
 
 function num(value: unknown): number | null {
@@ -192,6 +210,46 @@ function vegaAppKeyOf(device: WaterDeviceEntry): string | null {
 
 function capacityPathFor(appKey: string | null): string | null {
   return appKey ? `${appKey}.${VEGA_CAPACITY_TAG}` : null;
+}
+
+function fullCapacityPathFor(appKey: string | null): string | null {
+  return appKey ? `${appKey}.${VEGA_FULL_CAPACITY_TAG}` : null;
+}
+
+function maxRangeBound(element: unknown): number | null {
+  const ranges = (element as { ranges?: unknown } | null)?.ranges;
+  if (!Array.isArray(ranges)) return null;
+  let max: number | null = null;
+  for (const range of ranges) {
+    const bound = num((range as { max?: unknown } | null)?.max);
+    if (bound != null && (max == null || bound > max)) max = bound;
+  }
+  return max;
+}
+
+// Derive a reservoir's full volume from the device's published UI state: the
+// Vega "volume" gauge sets its top range bound to the full storage volume.
+// Lets the dashboard show capacity for already-deployed devices that don't yet
+// publish the full_volume tag.
+function fullVolumeFromUiState(
+  uiState: UiStateData | undefined,
+  appKey: string | null,
+): number | null {
+  if (!appKey) return null;
+  const app = uiState?.state?.children?.[appKey] as
+    | { children?: Record<string, unknown> | null }
+    | undefined;
+  const children = app?.children;
+  if (!children || typeof children !== "object") return null;
+
+  const preferred = maxRangeBound(children.volume);
+  if (preferred != null) return preferred;
+
+  for (const element of Object.values(children)) {
+    const bound = maxRangeBound(element);
+    if (bound != null) return bound;
+  }
+  return null;
 }
 
 function tagNameFromPath(path: string | null | undefined): string | null {
@@ -324,9 +382,7 @@ function mergeHistory(primary: CapacityPoint[], fallback: CapacityPoint[]): Capa
 
 function fmtCapacity(value: number | null): string {
   if (value == null) return "-";
-  if (Math.abs(value) >= 100) return `${value.toFixed(0)} ML`;
-  if (Math.abs(value) >= 10) return `${value.toFixed(1)} ML`;
-  return `${value.toFixed(2)} ML`;
+  return `${Math.round(value)} ML`;
 }
 
 function fmtChange(value: number | null): string {
@@ -338,6 +394,55 @@ function fmtChange(value: number | null): string {
 function fmtTime(value: number | null): string {
   if (value == null) return "-";
   return dayjs(value).fromNow();
+}
+
+function percentFull(value: number | null, full: number | null): number | null {
+  if (full == null || full <= 0 || value == null) return null;
+  return Math.round((chartCapacity(value) / full) * 100);
+}
+
+// Export the current storages and their levels over the selected window to a
+// multi-sheet .xlsx. xlsx is loaded on demand so it stays out of the initial
+// bundle.
+async function exportStoragesToExcel(rows: DeviceRow[], days: number): Promise<void> {
+  const XLSX = await import("xlsx");
+
+  const roundOrNull = (value: number | null): number | null =>
+    value == null ? null : Math.round(value);
+
+  const wb = XLSX.utils.book_new();
+
+  const summaryHeader = [
+    "Storage",
+    "Current Level (ML)",
+    "Full Capacity (ML)",
+    "Percent Full (%)",
+    `Change over ${days}d (ML)`,
+    "Last Updated",
+  ];
+  const summaryRows = rows.map((row) => [
+    row.displayName,
+    roundOrNull(row.capacity),
+    roundOrNull(row.fullCapacity),
+    percentFull(row.capacity, row.fullCapacity),
+    roundOrNull(row.change),
+    row.lastUpdated ? dayjs(row.lastUpdated).format("YYYY-MM-DD HH:mm") : null,
+  ]);
+  const summary = XLSX.utils.aoa_to_sheet([summaryHeader, ...summaryRows]);
+  summary["!cols"] = [{ wch: 28 }, { wch: 18 }, { wch: 18 }, { wch: 16 }, { wch: 20 }, { wch: 18 }];
+  XLSX.utils.book_append_sheet(wb, summary, "Summary");
+
+  const { data, series } = buildStackedFarmData(rows, days);
+  const levelsHeader = ["Time", ...series.map((s) => `${s.name} (ML)`)];
+  const levelsRows = data.map((point) => [
+    dayjs(num(point.t) ?? 0).format("YYYY-MM-DD HH:mm"),
+    ...series.map((s) => roundOrNull(num(point[s.key]))),
+  ]);
+  const levels = XLSX.utils.aoa_to_sheet([levelsHeader, ...levelsRows]);
+  levels["!cols"] = [{ wch: 18 }, ...series.map(() => ({ wch: 16 }))];
+  XLSX.utils.book_append_sheet(wb, levels, "Levels Over Time");
+
+  XLSX.writeFile(wb, `stored-water-${days}d-${dayjs().format("YYYYMMDD-HHmm")}.xlsx`);
 }
 
 function sortRows(rows: DeviceRow[], key: SortKey, dir: SortDir): DeviceRow[] {
@@ -450,32 +555,77 @@ function FarmCapacityChart({
   rows,
   days,
   onDaysChange,
+  scaleMode,
+  onScaleModeChange,
   emptyLabel,
 }: {
   title: string;
   rows: DeviceRow[];
   days: number;
   onDaysChange: (days: number) => void;
+  scaleMode: ScaleMode;
+  onScaleModeChange: (mode: ScaleMode) => void;
   emptyLabel: string;
 }) {
   const { data, series } = useMemo(() => buildStackedFarmData(rows, days), [rows, days]);
+
+  const totalFullCapacity = useMemo(() => {
+    const total = rows.reduce((sum, row) => sum + (row.fullCapacity ?? 0), 0);
+    return total > 0 ? total : null;
+  }, [rows]);
+
+  const maxStacked = useMemo(() => {
+    let max = 0;
+    for (const point of data) {
+      let stacked = 0;
+      for (const item of series) stacked += num(point[item.key]) ?? 0;
+      if (stacked > max) max = stacked;
+    }
+    return max;
+  }, [data, series]);
+
+  // "capacity" scales the axis to total storage capacity (the dotted line sits
+  // near the top); "fit" zooms to the stored-water level for detail.
+  const yMax = useMemo(() => {
+    const ceiling =
+      scaleMode === "capacity" ? Math.max(maxStacked, totalFullCapacity ?? 0) : maxStacked;
+    return ceiling > 0 ? Math.ceil(ceiling * 1.05) : "auto";
+  }, [scaleMode, maxStacked, totalFullCapacity]);
 
   return (
     <div className="water-panel">
       <div className="water-panel-header">
         <span className="water-panel-title">{title}</span>
-        <div className="water-range-group" aria-label="Timeline length">
-          {RANGE_OPTIONS.map((option) => (
-            <button
-              key={option.days}
-              className="water-range-button"
-              type="button"
-              onClick={() => onDaysChange(option.days)}
-              aria-pressed={days === option.days}
-            >
-              {option.label}
-            </button>
-          ))}
+        <div className="water-panel-controls">
+          {totalFullCapacity != null && (
+            <div className="water-range-group" aria-label="Axis scaling">
+              {SCALE_OPTIONS.map((option) => (
+                <button
+                  key={option.mode}
+                  className="water-range-button"
+                  type="button"
+                  title={option.title}
+                  onClick={() => onScaleModeChange(option.mode)}
+                  aria-pressed={scaleMode === option.mode}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="water-range-group" aria-label="Timeline length">
+            {RANGE_OPTIONS.map((option) => (
+              <button
+                key={option.days}
+                className="water-range-button"
+                type="button"
+                onClick={() => onDaysChange(option.days)}
+                aria-pressed={days === option.days}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
       <div className="water-chart">
@@ -497,6 +647,7 @@ function FarmCapacityChart({
                 stroke="var(--muted-foreground)"
                 tick={{ fontSize: 11 }}
                 tickFormatter={(v) => fmtCapacity(num(v))}
+                domain={[0, yMax]}
                 width={52}
               />
               <Tooltip
@@ -510,6 +661,21 @@ function FarmCapacityChart({
                   fontSize: 12,
                 }}
               />
+              {totalFullCapacity != null && (
+                <ReferenceLine
+                  y={totalFullCapacity}
+                  stroke="var(--muted-foreground)"
+                  strokeDasharray="6 4"
+                  strokeWidth={1.5}
+                  ifOverflow={scaleMode === "capacity" ? "extendDomain" : "hidden"}
+                  label={{
+                    value: `Total capacity ${fmtCapacity(totalFullCapacity)}`,
+                    position: "insideTopRight",
+                    fill: "var(--muted-foreground)",
+                    fontSize: 11,
+                  }}
+                />
+              )}
               {series.map((item) => (
                 <Area
                   key={item.key}
@@ -541,12 +707,41 @@ function Summary({ rows, farmSeries }: { rows: DeviceRow[]; farmSeries: Capacity
   return (
     <div className="water-summary">
       <span className="water-chip">
-        Devices <strong>{rows.length}</strong>
+        Storages <strong>{rows.length}</strong>
       </span>
       <span className="water-chip">
-        Farm capacity <strong>{fmtCapacity(shownTotal)}</strong>
+        Stored water <strong>{fmtCapacity(shownTotal)}</strong>
       </span>
     </div>
+  );
+}
+
+function FillBar({
+  value,
+  full,
+  color,
+}: {
+  value: number | null;
+  full: number | null;
+  color: string;
+}) {
+  if (full == null || full <= 0 || value == null) {
+    return <span className="water-muted">Capacity unknown</span>;
+  }
+  const pct = Math.max(0, Math.min(100, (chartCapacity(value) / full) * 100));
+  return (
+    <span
+      className="water-fillbar"
+      title={`${pct.toFixed(0)}% full (${fmtCapacity(value)} of ${fmtCapacity(full)})`}
+    >
+      <span className="water-fillbar-track">
+        <span
+          className="water-fillbar-fill"
+          style={{ width: `${pct}%`, backgroundColor: color }}
+        />
+      </span>
+      <span className="water-fillbar-label">{pct.toFixed(0)}%</span>
+    </span>
   );
 }
 
@@ -573,7 +768,7 @@ function DeviceTable({
           <thead>
             <tr>
               <SortHeader label="Dam / Device" sortKey="name" current={sortKey} dir={sortDir} onSort={onSort} />
-              <SortHeader label="Capacity" sortKey="capacity" current={sortKey} dir={sortDir} onSort={onSort} />
+              <SortHeader label="Level / Capacity" sortKey="capacity" current={sortKey} dir={sortDir} onSort={onSort} />
               <SortHeader label="Change" sortKey="change" current={sortKey} dir={sortDir} onSort={onSort} />
               <SortHeader label="Updated" sortKey="lastUpdated" current={sortKey} dir={sortDir} onSort={onSort} />
             </tr>
@@ -593,11 +788,16 @@ function DeviceTable({
                       <span className="water-device-color" style={{ backgroundColor: row.chartColor }} aria-hidden="true" />
                       <span className="water-device-name">
                         <strong title={row.displayName}>{row.displayName}</strong>
-                        <span className="water-muted">{row.deviceTypeName || row.id}</span>
+                        <FillBar value={row.capacity} full={row.fullCapacity} color={row.chartColor} />
                       </span>
                     </span>
                   </td>
-                  <td>{fmtCapacity(row.capacity)}</td>
+                  <td className="water-level-cell">
+                    {fmtCapacity(row.capacity)}
+                    {row.fullCapacity != null && (
+                      <span className="water-capacity-secondary"> / {fmtCapacity(row.fullCapacity)}</span>
+                    )}
+                  </td>
                   <td className={row.change != null && row.change < 0 ? "water-negative" : "water-positive"}>
                     {fmtChange(row.change)}
                   </td>
@@ -643,7 +843,7 @@ function DeviceQuickView({
 
         <div className="water-detail-stats">
           <div className="water-stat">
-            <span>Capacity</span>
+            <span>Level</span>
             <strong>{fmtCapacity(row.capacity)}</strong>
           </div>
           <div className="water-stat">
@@ -682,6 +882,8 @@ function FullscreenDialog({
   farmSeries,
   days,
   onDaysChange,
+  scaleMode,
+  onScaleModeChange,
   sortKey,
   sortDir,
   onSort,
@@ -693,6 +895,8 @@ function FullscreenDialog({
   farmSeries: CapacityPoint[];
   days: number;
   onDaysChange: (days: number) => void;
+  scaleMode: ScaleMode;
+  onScaleModeChange: (mode: ScaleMode) => void;
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (key: SortKey) => void;
@@ -712,22 +916,40 @@ function FullscreenDialog({
       <div className="water-fullscreen-header">
         <div>
           <h2 id="water-fullscreen-title" className="water-dialog-title">
-            Farm Water Capacity
+            Stored Water
           </h2>
           <div className="water-muted">Fleet storage overview</div>
         </div>
-        <button className="water-dialog-close" type="button" onClick={onClose} aria-label="Close fullscreen">
-          <X size={16} />
-        </button>
+        <div className="water-actions">
+          <button
+            className="water-button"
+            type="button"
+            onClick={() => {
+              void exportStoragesToExcel(rows, days).catch((error) => {
+                console.error("Failed to export storages to Excel", error);
+              });
+            }}
+            disabled={rows.length === 0}
+            title="Export to Excel"
+            aria-label="Export storages to Excel"
+          >
+            <Download size={14} />
+          </button>
+          <button className="water-dialog-close" type="button" onClick={onClose} aria-label="Close fullscreen">
+            <X size={16} />
+          </button>
+        </div>
       </div>
 
       <div className="water-fullscreen-content">
         <Summary rows={rows} farmSeries={farmSeries} />
         <FarmCapacityChart
-          title="Farm Water Capacity"
+          title="Stored Water"
           rows={rows}
           days={days}
           onDaysChange={onDaysChange}
+          scaleMode={scaleMode}
+          onScaleModeChange={onScaleModeChange}
           emptyLabel="No capacity history yet. Configure extended permissions for devices running Vega Level Sensor."
         />
         <DeviceTable
@@ -762,6 +984,8 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
   const [rangeDays, setRangeDays] = useState(configuredDays);
   useEffect(() => setRangeDays(configuredDays), [configuredDays]);
 
+  const [scaleMode, setScaleMode] = useState<ScaleMode>(DEFAULT_SCALE_MODE);
+
   const { devices, isLoading: devicesLoading } = useDeviceMap<WaterDeviceEntry>(
     agentId,
     dashboardAppKey,
@@ -787,6 +1011,14 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     "tag_values",
     deviceIds,
     { fields: fieldRoots },
+  );
+
+  // Published UI schema per device — used to read each reservoir's full volume
+  // from the Vega volume gauge's range bounds.
+  const { aggregatesByAgent: uiStateByAgent } = useMultiAgentAggregates<UiStateData>(
+    "ui_state",
+    deviceIds,
+    { fields: ["state"] },
   );
 
   const fleetTop = useMemo(() => Date.now() + 60_000, []);
@@ -903,10 +1135,16 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
       const path = capacityPathFor(vegaAppKey);
       const aggregate = aggregatesByAgent[device.id];
       const current = resolveCapacityNumber(aggregate?.data, path);
+      const fullCapacity =
+        resolveCapacityNumber(aggregate?.data, fullCapacityPathFor(vegaAppKey)) ??
+        fullVolumeFromUiState(uiStateByAgent[device.id]?.data, vegaAppKey);
       const history = historyByDevice[device.id] ?? [];
       const lastHistoryPoint = history.length ? history[history.length - 1] : null;
       const lastUpdated =
         toEpochMs(aggregate?.last_updated) ?? lastHistoryPoint?.t ?? null;
+      // Current level is a stored volume, so floor it at zero (a reading below
+      // empty is meaningless); keep null distinct so "unknown" still shows "-".
+      const rawCapacity = current ?? lastHistoryPoint?.value ?? null;
       return {
         id: device.id,
         name: device.name || device.id,
@@ -914,21 +1152,22 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
         deviceTypeName: device.type?.name ?? null,
         chartColor: STACK_COLORS[index % STACK_COLORS.length],
         vegaAppKey,
-        capacity: current ?? lastHistoryPoint?.value ?? null,
+        capacity: rawCapacity == null ? null : Math.max(0, rawCapacity),
+        fullCapacity,
         lastUpdated,
         history,
         change: latestChange(filterPoints(history, rangeDays)),
       };
     });
-  }, [devices, vegaAppKeyByDevice, aggregatesByAgent, historyByDevice, rangeDays]);
+  }, [devices, vegaAppKeyByDevice, aggregatesByAgent, uiStateByAgent, historyByDevice, rangeDays]);
 
   const farmSeries = useMemo(
     () => buildFarmSeries(rows, [], rangeDays),
     [rows, rangeDays],
   );
 
-  const [sortKey, setSortKey] = useState<SortKey>("name");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [sortKey, setSortKey] = useState<SortKey>("fullCapacity");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const sortedRows = useMemo(() => sortRows(rows, sortKey, sortDir), [rows, sortKey, sortDir]);
   const onSort = (key: SortKey) => {
     if (key === sortKey) setSortDir((dir) => (dir === "asc" ? "desc" : "asc"));
@@ -968,6 +1207,12 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
   };
   const [fullscreen, setFullscreen] = useState(false);
 
+  const handleExport = () => {
+    void exportStoragesToExcel(rows, rangeDays).catch((error) => {
+      console.error("Failed to export storages to Excel", error);
+    });
+  };
+
   if (devicesLoading || (deviceIds.length > 0 && aggregateQuery.isLoading)) {
     return <div className="water-dashboard water-empty">Loading devices...</div>;
   }
@@ -977,6 +1222,16 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
       <div className="water-header">
         <Summary rows={rows} farmSeries={farmSeries} />
         <div className="water-actions">
+          <button
+            className="water-button"
+            type="button"
+            onClick={handleExport}
+            disabled={rows.length === 0}
+            title="Export to Excel"
+            aria-label="Export storages to Excel"
+          >
+            <Download size={14} />
+          </button>
           <button
             className="water-button"
             type="button"
@@ -990,10 +1245,12 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
       </div>
 
       <FarmCapacityChart
-        title="Farm Water Capacity"
+        title="Stored Water"
         rows={rows}
         days={rangeDays}
         onDaysChange={setRangeDays}
+        scaleMode={scaleMode}
+        onScaleModeChange={setScaleMode}
         emptyLabel="No capacity history yet. Configure extended permissions for devices running Vega Level Sensor."
       />
 
@@ -1014,6 +1271,8 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
           farmSeries={farmSeries}
           days={rangeDays}
           onDaysChange={setRangeDays}
+          scaleMode={scaleMode}
+          onScaleModeChange={setScaleMode}
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={onSort}
