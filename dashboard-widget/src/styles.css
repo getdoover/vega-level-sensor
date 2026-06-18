@@ -1,0 +1,435 @@
+.water-dashboard {
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.water-dashboard * {
+  box-sizing: border-box;
+}
+
+.water-header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.water-actions,
+.water-range-group,
+.water-panel-controls,
+.water-summary {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.water-panel-controls {
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.water-header .water-summary {
+  flex: 1 1 auto;
+}
+
+.water-chip,
+.water-button,
+.water-range-button {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 28px;
+  white-space: nowrap;
+}
+
+.water-chip {
+  background: color-mix(in srgb, var(--muted) 55%, transparent);
+  color: var(--muted-foreground);
+  padding: 4px 8px;
+}
+
+.water-chip strong {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.water-button,
+.water-range-button {
+  background: color-mix(in srgb, var(--background) 92%, var(--foreground));
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  justify-content: center;
+  padding: 4px 8px;
+  text-decoration: none;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.water-button:hover,
+.water-range-button:hover {
+  background: color-mix(in srgb, var(--muted) 75%, transparent);
+}
+
+.water-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.water-range-button[aria-pressed="true"] {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.water-button svg {
+  height: 14px;
+  width: 14px;
+}
+
+.water-button-primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.water-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.water-panel-header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 8px 10px;
+}
+
+.water-panel-title {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.water-muted {
+  color: var(--muted-foreground);
+}
+
+.water-chart {
+  height: 250px;
+  padding: 8px;
+}
+
+.water-list-wrap {
+  overflow-x: auto;
+}
+
+.water-table {
+  border-collapse: collapse;
+  min-width: 560px;
+  width: 100%;
+}
+
+.water-table th,
+.water-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.water-table th {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.water-table th button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  gap: 4px;
+  padding: 0;
+}
+
+.water-table tbody tr {
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.water-table tbody tr:hover {
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+
+.water-table td:nth-child(2),
+.water-table td:nth-child(3),
+.water-table td:nth-child(4),
+.water-table th:nth-child(2),
+.water-table th:nth-child(3),
+.water-table th:nth-child(4) {
+  text-align: right;
+}
+
+.water-device-cell {
+  align-items: stretch;
+  display: inline-flex;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+.water-device-color {
+  border-radius: 999px;
+  flex: 0 0 4px;
+  min-height: 34px;
+}
+
+.water-device-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.water-device-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.water-fillbar {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.water-fillbar-track {
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+  border-radius: 999px;
+  flex: 1 1 auto;
+  height: 6px;
+  max-width: 120px;
+  min-width: 48px;
+  overflow: hidden;
+}
+
+.water-fillbar-fill {
+  border-radius: 999px;
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  transition: width 200ms ease;
+}
+
+.water-fillbar-label {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.water-level-cell {
+  white-space: nowrap;
+}
+
+.water-capacity-secondary {
+  color: var(--muted-foreground);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.water-positive {
+  color: #15803d;
+}
+
+.water-negative {
+  color: #b45309;
+}
+
+.water-empty {
+  color: var(--muted-foreground);
+  padding: 28px 10px;
+  text-align: center;
+}
+
+.water-overlay {
+  background: rgba(0, 0, 0, 0.74);
+  inset: 0;
+  position: fixed;
+  z-index: 1200;
+}
+
+.water-dialog {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
+  left: 50%;
+  max-height: min(88vh, 760px);
+  max-width: min(720px, calc(100vw - 24px));
+  overflow-y: auto;
+  padding: 14px;
+  position: fixed;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 100%;
+  z-index: 1201;
+}
+
+.water-dialog-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.water-dialog-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.water-dialog-close {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  width: 28px;
+}
+
+.water-dialog-close:hover {
+  background: color-mix(in srgb, var(--muted) 65%, transparent);
+  color: var(--foreground);
+}
+
+.water-fullscreen {
+  background: var(--background);
+  color: var(--foreground);
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  inset: 0;
+  line-height: 1.45;
+  position: fixed;
+  z-index: 1100;
+}
+
+.water-fullscreen * {
+  box-sizing: border-box;
+}
+
+.water-fullscreen-header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+.water-fullscreen-content {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 16px;
+}
+
+.water-fullscreen .water-summary {
+  margin-bottom: 10px;
+}
+
+.water-fullscreen .water-chart {
+  height: min(52vh, 520px);
+  min-height: 300px;
+}
+
+.water-detail-stats {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 10px;
+}
+
+.water-stat {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.water-stat span {
+  color: var(--muted-foreground);
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.water-stat strong {
+  display: block;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.water-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+@media (max-width: 640px) {
+  .water-chart {
+    height: 220px;
+  }
+
+  .water-fullscreen-header {
+    padding: 10px 12px;
+  }
+
+  .water-fullscreen-content {
+    padding: 12px;
+  }
+
+  .water-fullscreen .water-chart {
+    height: 320px;
+    min-height: 260px;
+  }
+
+  .water-detail-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .water-table {
+    min-width: 430px;
+  }
+
+  .water-table th,
+  .water-table td {
+    padding: 8px;
+  }
+}
