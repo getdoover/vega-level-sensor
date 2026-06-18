@@ -53,6 +53,7 @@ const DEFAULT_AGENT_MSG_LIMIT = 500;
 const VEGA_APP_NAME = "vega_level_sensor";
 const VEGA_CAPACITY_TAG = "last_volume";
 const VEGA_FULL_CAPACITY_TAG = "full_volume";
+const LEGACY_UI_VOLUME_PATH = "state.children.vegameterlastVolume";
 const STACK_COLORS = [
   "#2563eb",
   "#16a34a",
@@ -142,6 +143,22 @@ interface CapacityPoint {
   value: number;
 }
 
+interface PrimitiveLeaf {
+  path: string;
+  value: string | number | boolean | null;
+}
+
+interface LegacyMarker {
+  path: string;
+  value: string;
+}
+
+interface LegacyUiCapacity {
+  value: number | null;
+  fullCapacity: number | null;
+  path: string | null;
+}
+
 interface StackedCapacitySeries {
   key: string;
   name: string;
@@ -160,6 +177,7 @@ interface DeviceRow {
   deviceTypeName: string | null;
   chartColor: string;
   vegaAppKey: string | null;
+  legacyMarkerValue: string | null;
   capacity: number | null;
   fullCapacity: number | null;
   lastUpdated: number | null;
@@ -179,9 +197,23 @@ function num(value: unknown): number | null {
   return null;
 }
 
+function numFromDisplay(value: unknown): number | null {
+  const direct = num(value);
+  if (direct != null) return direct;
+  if (typeof value !== "string" || value.includes("$")) return null;
+  const match = value.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  return num(match[0]);
+}
+
 function toEpochMs(value: unknown): number | null {
   const n = num(value);
-  return n != null && n > 0 ? n : null;
+  if (n == null || n <= 0) return null;
+  return n < 100_000_000_000 ? n * 1000 : n;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
 function displayNameOf(device: WaterDeviceEntry): string {
@@ -221,10 +253,146 @@ function maxRangeBound(element: unknown): number | null {
   if (!Array.isArray(ranges)) return null;
   let max: number | null = null;
   for (const range of ranges) {
-    const bound = num((range as { max?: unknown } | null)?.max);
+    const record = range as { max?: unknown; to?: unknown; upper?: unknown; value?: unknown } | null;
+    const bound = num(record?.max) ?? num(record?.to) ?? num(record?.upper) ?? num(record?.value);
     if (bound != null && (max == null || bound > max)) max = bound;
   }
   return max;
+}
+
+function primitiveLeaves(value: unknown, path = ""): PrimitiveLeaf[] {
+  if (value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return [{ path, value: value as PrimitiveLeaf["value"] }];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => primitiveLeaves(item, path ? `${path}.${index}` : String(index)));
+  }
+  if (!isRecord(value)) return [];
+  return Object.entries(value).flatMap(([key, item]) =>
+    primitiveLeaves(item, path ? `${path}.${key}` : key),
+  );
+}
+
+function legacyMarkerFromTagData(data: unknown): LegacyMarker | null {
+  if (isRecord(data)) {
+    const entries = Object.entries(data).filter(([, value]) => value != null);
+    if (entries.length === 1) {
+      const [key] = entries[0];
+      if (key.toLowerCase().includes("legacy")) return { path: key, value: key };
+    }
+  }
+
+  const leaves = primitiveLeaves(data).filter((leaf) => leaf.value != null);
+  if (leaves.length !== 1) return null;
+  const [leaf] = leaves;
+  if (typeof leaf.value !== "string" || !leaf.value.toLowerCase().includes("legacy")) return null;
+  return { path: leaf.path, value: leaf.value };
+}
+
+function elementText(element: Record<string, unknown>, path: string): string {
+  const parts = [
+    path,
+    element.name,
+    element.displayString,
+    element.display_name,
+    element.label,
+    element.units,
+  ];
+  const ranges = element.ranges;
+  if (Array.isArray(ranges)) {
+    for (const range of ranges) {
+      if (isRecord(range)) parts.push(range.label, range.name);
+    }
+  }
+  return parts
+    .filter((part): part is string => typeof part === "string")
+    .join(" ")
+    .toLowerCase();
+}
+
+function numericElementValue(element: Record<string, unknown>): number | null {
+  for (const key of [
+    "currentValue",
+    "current_value",
+    "value",
+    "displayValue",
+    "display_value",
+    "lastValue",
+    "last_value",
+    "rawValue",
+    "raw_value",
+  ]) {
+    const value = numFromDisplay(element[key]);
+    if (value != null) return value;
+  }
+  return null;
+}
+
+function legacyCapacityFromUiState(uiState: unknown): LegacyUiCapacity {
+  const candidates: Array<LegacyUiCapacity & { score: number }> = [];
+
+  const legacyVolume = resolveDottedValue(uiState, LEGACY_UI_VOLUME_PATH);
+  if (isRecord(legacyVolume)) {
+    const fullCapacity = maxRangeBound(legacyVolume);
+    const value = numericElementValue(legacyVolume);
+    if (fullCapacity != null || value != null) {
+      return {
+        value,
+        fullCapacity,
+        path: LEGACY_UI_VOLUME_PATH,
+      };
+    }
+  }
+
+  const visit = (node: unknown, path: string) => {
+    if (!isRecord(node)) return;
+
+    const fullCapacity = maxRangeBound(node);
+    if (fullCapacity != null && fullCapacity > 0) {
+      const text = elementText(node, path);
+      const units = typeof node.units === "string" ? node.units.toLowerCase() : "";
+      const hasCapacityName = /\b(volume|capacity|storage)\b/.test(text);
+      const hasWaterName = /\b(water|tank|dam|level)\b/.test(text);
+      const hasCapacityUnits = /\b(ml|megs?|mega\s*litres?|megalitres?|litres?|l|m3|m\^3)\b/.test(units);
+      const isPercent = units === "%" || units.includes("percent");
+      const isClearlySensor =
+        /\b(reliability|distance|sensor|battery|signal|rssi|db)\b/.test(text) ||
+        units === "db";
+
+      if (!isClearlySensor || hasCapacityName || hasCapacityUnits) {
+        const value = numericElementValue(node);
+        let score = 0;
+        if (hasCapacityName) score += 100;
+        if (hasCapacityUnits) score += 70;
+        if (hasWaterName) score += 30;
+        if (value != null) score += 20;
+        if (text.includes("full")) score += 10;
+        if (isPercent) score -= 50;
+        if (isClearlySensor) score -= 100;
+        if (score > 0 || value != null) {
+          candidates.push({ value, fullCapacity, path, score });
+        }
+      }
+    }
+
+    const children = node.children;
+    if (isRecord(children)) {
+      for (const [key, child] of Object.entries(children)) {
+        visit(child, path ? `${path}.children.${key}` : `children.${key}`);
+      }
+    }
+    for (const [key, child] of Object.entries(node)) {
+      if (key === "children" || key === "ranges") continue;
+      if (isRecord(child)) visit(child, path ? `${path}.${key}` : key);
+    }
+  };
+
+  visit(uiState, "");
+  candidates.sort((a, b) => b.score - a.score || (b.fullCapacity ?? 0) - (a.fullCapacity ?? 0));
+  const best = candidates[0];
+  return best
+    ? { value: best.value, fullCapacity: best.fullCapacity, path: best.path || null }
+    : { value: null, fullCapacity: null, path: null };
 }
 
 // Derive a reservoir's full volume from the device's published UI state: the
@@ -258,14 +426,18 @@ function tagNameFromPath(path: string | null | undefined): string | null {
   return parts[parts.length - 1] ?? null;
 }
 
-function resolveDottedNumber(source: unknown, path: string | null | undefined): number | null {
+function resolveDottedValue(source: unknown, path: string | null | undefined): unknown {
   if (!path || source == null || typeof source !== "object") return null;
   let current: unknown = source;
   for (const part of path.split(".")) {
     if (current == null || typeof current !== "object") return null;
     current = (current as Record<string, unknown>)[part];
   }
-  return num(current);
+  return current;
+}
+
+function resolveDottedNumber(source: unknown, path: string | null | undefined): number | null {
+  return num(resolveDottedValue(source, path));
 }
 
 function resolveCapacityNumber(source: unknown, path: string | null | undefined): number | null {
@@ -282,6 +454,23 @@ function resolveCapacityNumber(source: unknown, path: string | null | undefined)
 
   const tagName = tagNameFromPath(path);
   return tagName ? num(record[tagName]) : null;
+}
+
+function legacyCapacityValueFromUiState(uiState: unknown, path: string | null): number | null {
+  if (!path) return legacyCapacityFromUiState(uiState).value;
+  const currentValue = numFromDisplay(resolveDottedValue(uiState, `${path}.currentValue`));
+  if (currentValue != null) return currentValue;
+
+  const element = resolveDottedValue(uiState, path);
+  return isRecord(element) ? numericElementValue(element) : null;
+}
+
+function legacyBridgeTimestamp(uiStateMessageData: unknown): number | null {
+  return toEpochMs(
+    isRecord(uiStateMessageData)
+      ? uiStateMessageData.doover_legacy_bridge_at
+      : null,
+  );
 }
 
 function timestampFromSnowflake(id: unknown): number | null {
@@ -701,7 +890,7 @@ function FarmCapacityChart({
 function Summary({ rows, farmSeries }: { rows: DeviceRow[]; farmSeries: CapacityPoint[] }) {
   const latestFarm = farmSeries.length ? farmSeries[farmSeries.length - 1].value : null;
   const currentTotal = rows.reduce((sum, r) => sum + chartCapacity(r.capacity), 0);
-  const hasConfiguredDevice = rows.some((r) => r.vegaAppKey);
+  const hasConfiguredDevice = rows.some((r) => r.vegaAppKey || r.legacyMarkerValue);
   const shownTotal = latestFarm ?? (hasConfiguredDevice ? currentTotal : null);
 
   return (
@@ -1007,6 +1196,22 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     [vegaAppKeyByDevice],
   );
 
+  const { aggregatesByAgent: allTagAggregatesByAgent, query: allTagAggregateQuery } =
+    useMultiAgentAggregates<TagAggregate>(
+      "tag_values",
+      deviceIds,
+      { liveUpdates: false },
+    );
+
+  const legacyMarkerByDevice = useMemo<Record<string, LegacyMarker>>(() => {
+    const out: Record<string, LegacyMarker> = {};
+    for (const device of devices) {
+      const marker = legacyMarkerFromTagData(allTagAggregatesByAgent[device.id]?.data);
+      if (marker) out[device.id] = marker;
+    }
+    return out;
+  }, [devices, allTagAggregatesByAgent]);
+
   const { aggregatesByAgent, query: aggregateQuery } = useMultiAgentAggregates<TagAggregate>(
     "tag_values",
     deviceIds,
@@ -1018,8 +1223,17 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
   const { aggregatesByAgent: uiStateByAgent } = useMultiAgentAggregates<UiStateData>(
     "ui_state",
     deviceIds,
-    { fields: ["state"] },
+    { fields: ["state", "doover_legacy_bridge_at"] },
   );
+
+  const legacyUiCapacityByDevice = useMemo<Record<string, LegacyUiCapacity>>(() => {
+    const out: Record<string, LegacyUiCapacity> = {};
+    for (const device of devices) {
+      if (!legacyMarkerByDevice[device.id]) continue;
+      out[device.id] = legacyCapacityFromUiState(uiStateByAgent[device.id]?.data);
+    }
+    return out;
+  }, [devices, legacyMarkerByDevice, uiStateByAgent]);
 
   const fleetTop = useMemo(() => Date.now() + 60_000, []);
   const before = useMemo(() => generateSnowflakeIdAtTime(fleetTop), [fleetTop]);
@@ -1027,20 +1241,25 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     () => generateSnowflakeIdAtTime(fleetTop - MAX_HISTORY_DAYS * DAY_MS),
     [fleetTop],
   );
-  const historyAgentIds = useMemo(
+  const normalHistoryAgentIds = useMemo(
     () => devices.filter((d) => vegaAppKeyByDevice[d.id]).map((d) => d.id),
     [devices, vegaAppKeyByDevice],
   );
+  const legacyHistoryAgentIds = useMemo(
+    () => devices.filter((d) => legacyMarkerByDevice[d.id]).map((d) => d.id),
+    [devices, legacyMarkerByDevice],
+  );
+  const historyAgentCount = normalHistoryAgentIds.length + legacyHistoryAgentIds.length;
   const agentMessageLimit = useMemo(
     () =>
-      historyAgentIds.length > 0
-        ? Math.max(1, Math.min(DEFAULT_AGENT_MSG_LIMIT, Math.floor(FLEET_MSG_CEILING / historyAgentIds.length)))
+      historyAgentCount > 0
+        ? Math.max(1, Math.min(DEFAULT_AGENT_MSG_LIMIT, Math.floor(FLEET_MSG_CEILING / historyAgentCount)))
         : DEFAULT_AGENT_MSG_LIMIT,
-    [historyAgentIds.length],
+    [historyAgentCount],
   );
   const historyQuery = useMultiAgentChannelMessages<ChannelMessage>(
     "tag_values",
-    historyAgentIds,
+    normalHistoryAgentIds,
     {
       initialBefore: before,
       after,
@@ -1050,20 +1269,31 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     },
   );
 
+  const legacyUiHistoryQuery = useMultiAgentChannelMessages<ChannelMessage>(
+    "ui_state",
+    legacyHistoryAgentIds,
+    {
+      initialBefore: before,
+      agentMessageLimit,
+      fields: ["state", "doover_legacy_bridge_at"],
+      liveUpdates: false,
+    },
+  );
+
   const timeseriesQuery = useQuery({
     queryKey: [
       "farm-water-dashboard",
       "capacity-timeseries",
-      historyAgentIds.join(","),
+      normalHistoryAgentIds.join(","),
       capacityFields.join(","),
       before,
       after,
       agentMessageLimit,
     ],
-    enabled: historyAgentIds.length > 0 && capacityFields.length > 0,
+    enabled: normalHistoryAgentIds.length > 0 && capacityFields.length > 0,
     staleTime: 60_000,
     queryFn: async () => {
-      const entries = historyAgentIds
+      const entries = normalHistoryAgentIds
         .map((id) => ({ id, path: capacityPathFor(vegaAppKeyByDevice[id] ?? null) }))
         .filter((entry): entry is { id: string; path: string } => !!entry.path);
 
@@ -1117,31 +1347,64 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     return out;
   }, [historyQuery.messages, vegaAppKeyByDevice]);
 
+  const legacyMessageHistoryByDevice = useMemo<Record<string, CapacityPoint[]>>(() => {
+    const out: Record<string, CapacityPoint[]> = {};
+    for (const message of legacyUiHistoryQuery.messages ?? []) {
+      const id = message.channel?.agent_id == null ? null : String(message.channel.agent_id);
+      if (!id || !legacyMarkerByDevice[id]) continue;
+      const value = legacyCapacityValueFromUiState(
+        message.data,
+        legacyUiCapacityByDevice[id]?.path ?? LEGACY_UI_VOLUME_PATH,
+      );
+      const t =
+        legacyBridgeTimestamp(message.data) ??
+        toEpochMs(message.timestamp) ??
+        timestampFromSnowflake(message.id);
+      if (value == null || t == null) continue;
+      (out[id] ??= []).push({ t, value });
+    }
+    for (const id of Object.keys(out)) out[id].sort((a, b) => a.t - b.t);
+    return out;
+  }, [legacyUiHistoryQuery.messages, legacyMarkerByDevice, legacyUiCapacityByDevice]);
+
   const historyByDevice = useMemo<Record<string, CapacityPoint[]>>(() => {
     const out: Record<string, CapacityPoint[]> = {};
     const ids = new Set([
       ...Object.keys(messageHistoryByDevice),
+      ...Object.keys(legacyMessageHistoryByDevice),
       ...Object.keys(timeseriesQuery.data ?? {}),
     ]);
     for (const id of ids) {
-      out[id] = mergeHistory(timeseriesQuery.data?.[id] ?? [], messageHistoryByDevice[id] ?? []);
+      const normalHistory = mergeHistory(timeseriesQuery.data?.[id] ?? [], messageHistoryByDevice[id] ?? []);
+      out[id] = mergeHistory(normalHistory, legacyMessageHistoryByDevice[id] ?? []);
     }
     return out;
-  }, [messageHistoryByDevice, timeseriesQuery.data]);
+  }, [messageHistoryByDevice, legacyMessageHistoryByDevice, timeseriesQuery.data]);
 
   const rows = useMemo<DeviceRow[]>(() => {
     return devices.map((device, index) => {
       const vegaAppKey = vegaAppKeyByDevice[device.id] ?? null;
+      const legacyMarker = legacyMarkerByDevice[device.id] ?? null;
+      const legacyUiCapacity = legacyUiCapacityByDevice[device.id];
       const path = capacityPathFor(vegaAppKey);
       const aggregate = aggregatesByAgent[device.id];
-      const current = resolveCapacityNumber(aggregate?.data, path);
+      const uiStateAggregate = uiStateByAgent[device.id];
+      const current =
+        resolveCapacityNumber(aggregate?.data, path) ??
+        (legacyMarker ? legacyUiCapacity?.value ?? null : null);
       const fullCapacity =
         resolveCapacityNumber(aggregate?.data, fullCapacityPathFor(vegaAppKey)) ??
-        fullVolumeFromUiState(uiStateByAgent[device.id]?.data, vegaAppKey);
+        fullVolumeFromUiState(uiStateAggregate?.data, vegaAppKey) ??
+        (legacyMarker ? legacyUiCapacity?.fullCapacity ?? null : null);
       const history = historyByDevice[device.id] ?? [];
       const lastHistoryPoint = history.length ? history[history.length - 1] : null;
       const lastUpdated =
-        toEpochMs(aggregate?.last_updated) ?? lastHistoryPoint?.t ?? null;
+        toEpochMs(aggregate?.last_updated) ??
+        (legacyMarker
+          ? legacyBridgeTimestamp(uiStateAggregate?.data) ?? toEpochMs(uiStateAggregate?.last_updated)
+          : null) ??
+        lastHistoryPoint?.t ??
+        null;
       // Current level is a stored volume, so floor it at zero (a reading below
       // empty is meaningless); keep null distinct so "unknown" still shows "-".
       const rawCapacity = current ?? lastHistoryPoint?.value ?? null;
@@ -1152,6 +1415,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
         deviceTypeName: device.type?.name ?? null,
         chartColor: STACK_COLORS[index % STACK_COLORS.length],
         vegaAppKey,
+        legacyMarkerValue: legacyMarker?.value ?? null,
         capacity: rawCapacity == null ? null : Math.max(0, rawCapacity),
         fullCapacity,
         lastUpdated,
@@ -1159,7 +1423,16 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
         change: latestChange(filterPoints(history, rangeDays)),
       };
     });
-  }, [devices, vegaAppKeyByDevice, aggregatesByAgent, uiStateByAgent, historyByDevice, rangeDays]);
+  }, [
+    devices,
+    vegaAppKeyByDevice,
+    legacyMarkerByDevice,
+    legacyUiCapacityByDevice,
+    aggregatesByAgent,
+    uiStateByAgent,
+    historyByDevice,
+    rangeDays,
+  ]);
 
   const farmSeries = useMemo(
     () => buildFarmSeries(rows, [], rangeDays),
@@ -1213,7 +1486,10 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     });
   };
 
-  if (devicesLoading || (deviceIds.length > 0 && aggregateQuery.isLoading)) {
+  if (
+    devicesLoading ||
+    (deviceIds.length > 0 && (aggregateQuery.isLoading || allTagAggregateQuery.isLoading))
+  ) {
     return <div className="water-dashboard water-empty">Loading devices...</div>;
   }
 
