@@ -10,13 +10,11 @@ import { useRemoteParams } from "customer_site/useRemoteParams";
 import {
   useAgentChannel,
   useDeviceMap,
-  useDooverClient,
   useMultiAgentAggregates,
   useMultiAgentChannelMessages,
   type DeviceMapEntry,
 } from "doover-js/react";
 import { extractSnowflakeId, generateSnowflakeIdAtTime } from "doover-js";
-import { useQuery } from "@tanstack/react-query";
 
 import dayjs from "dayjs";
 import localizedFormat from "dayjs/plugin/localizedFormat";
@@ -48,8 +46,10 @@ dayjs.extend(relativeTime);
 const DAY_MS = 86_400_000;
 const DEFAULT_HISTORY_DAYS = 7;
 const MAX_HISTORY_DAYS = 90;
-const FLEET_MSG_CEILING = 50_000;
-const DEFAULT_AGENT_MSG_LIMIT = 500;
+const WEEK_MS = 7 * DAY_MS;
+// Server max is 1500; a week of Agbot readings (re-sent ~11x each) is ~700.
+const AGENT_MSG_LIMIT = 1000;
+const LEGACY_AGENT_MSG_LIMIT = 500;
 const DEFAULT_TITLE = "Stored Water";
 const DEFAULT_UNIT = "ML";
 
@@ -156,17 +156,6 @@ interface ChannelMessage {
   channel?: {
     agent_id?: string | number | null;
   } | null;
-}
-
-interface DataSeriesResult {
-  value?: unknown;
-  message_id?: string | number | null;
-  id?: string | number | null;
-  timestamp?: number | string | null;
-}
-
-interface DataSeriesResponse {
-  results?: DataSeriesResult[];
 }
 
 interface CapacityPoint {
@@ -605,6 +594,14 @@ function buildStackedFarmData(rows: DeviceRow[], days: number): StackedCapacityD
   };
 }
 
+// Agbots re-send each reading many times; keep only value changes (plus the
+// latest point) so long ranges stay light to chart.
+function collapseRepeats(points: CapacityPoint[]): CapacityPoint[] {
+  return points.filter(
+    (p, i) => i === 0 || i === points.length - 1 || p.value !== points[i - 1].value,
+  );
+}
+
 function mergeHistory(primary: CapacityPoint[], fallback: CapacityPoint[]): CapacityPoint[] {
   if (primary.length === 0) return fallback;
   if (fallback.length === 0) return primary;
@@ -795,6 +792,7 @@ function FarmCapacityChart({
   scaleMode,
   onScaleModeChange,
   emptyLabel,
+  loading,
 }: {
   title: string;
   rows: DeviceRow[];
@@ -803,6 +801,7 @@ function FarmCapacityChart({
   scaleMode: ScaleMode;
   onScaleModeChange: (mode: ScaleMode) => void;
   emptyLabel: string;
+  loading: boolean;
 }) {
   const { data, series } = useMemo(() => buildStackedFarmData(rows, days), [rows, days]);
   const { unit } = useContext(LabelsContext);
@@ -835,6 +834,7 @@ function FarmCapacityChart({
       <div className="water-panel-header">
         <span className="water-panel-title">{title}</span>
         <div className="water-panel-controls">
+          {loading && <span className="water-muted">Loading history...</span>}
           {totalFullCapacity != null && (
             <div className="water-range-group" aria-label="Axis scaling">
               {SCALE_OPTIONS.map((option) => (
@@ -868,7 +868,7 @@ function FarmCapacityChart({
       </div>
       <div className="water-chart">
         {data.length === 0 ? (
-          <div className="water-empty">{emptyLabel}</div>
+          <div className="water-empty">{loading ? "Loading history..." : emptyLabel}</div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data} margin={{ top: 8, right: 18, bottom: 4, left: 2 }}>
@@ -1126,6 +1126,7 @@ function FullscreenDialog({
   onDaysChange,
   scaleMode,
   onScaleModeChange,
+  historyLoading,
   sortKey,
   sortDir,
   onSort,
@@ -1139,6 +1140,7 @@ function FullscreenDialog({
   onDaysChange: (days: number) => void;
   scaleMode: ScaleMode;
   onScaleModeChange: (mode: ScaleMode) => void;
+  historyLoading: boolean;
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (key: SortKey) => void;
@@ -1194,6 +1196,7 @@ function FullscreenDialog({
           scaleMode={scaleMode}
           onScaleModeChange={onScaleModeChange}
           emptyLabel={`No capacity history yet. ${NO_DEVICES_HINT}`}
+          loading={historyLoading}
         />
         <DeviceTable
           rows={tableRows}
@@ -1209,7 +1212,6 @@ function FullscreenDialog({
 }
 
 function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteComponentWater }) {
-  const client = useDooverClient();
   const params = useRemoteParams();
   const agentId = params?.agentId == null ? undefined : String(params.agentId);
   const dashboardAppKey = uiElement?.app_key ?? "";
@@ -1301,10 +1303,13 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
 
   const fleetTop = useMemo(() => Date.now() + 60_000, []);
   const before = useMemo(() => generateSnowflakeIdAtTime(fleetTop), [fleetTop]);
+  // Only the selected range is fetched; a longer range is a new query, read in
+  // 7-day windows by the hook's autoPaginate.
   const after = useMemo(
-    () => generateSnowflakeIdAtTime(fleetTop - MAX_HISTORY_DAYS * DAY_MS),
-    [fleetTop],
+    () => generateSnowflakeIdAtTime(fleetTop - rangeDays * DAY_MS),
+    [fleetTop, rangeDays],
   );
+  const maxPages = Math.ceil((rangeDays * DAY_MS) / WEEK_MS) * 4;
   const normalHistoryAgentIds = useMemo(
     () => devices.filter((d) => levelInstallByDevice[d.id]).map((d) => d.id),
     [devices, levelInstallByDevice],
@@ -1313,87 +1318,33 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     () => devices.filter((d) => legacyMarkerByDevice[d.id]).map((d) => d.id),
     [devices, legacyMarkerByDevice],
   );
-  const historyAgentCount = normalHistoryAgentIds.length + legacyHistoryAgentIds.length;
-  const agentMessageLimit = useMemo(
-    () =>
-      historyAgentCount > 0
-        ? Math.max(1, Math.min(DEFAULT_AGENT_MSG_LIMIT, Math.floor(FLEET_MSG_CEILING / historyAgentCount)))
-        : DEFAULT_AGENT_MSG_LIMIT,
-    [historyAgentCount],
-  );
   const historyQuery = useMultiAgentChannelMessages<ChannelMessage>(
     "tag_values",
     normalHistoryAgentIds,
     {
       initialBefore: before,
       after,
-      agentMessageLimit,
-      fields: fieldRoots,
+      agentMessageLimit: AGENT_MSG_LIMIT,
+      fields: capacityFields,
       liveUpdates: false,
+      autoPaginate: true,
+      maxPages,
     },
   );
+  const historyLoading =
+    historyQuery.isFetching ||
+    (historyQuery.hasNextPage && (historyQuery.data?.pages.length ?? 0) < maxPages);
 
   const legacyUiHistoryQuery = useMultiAgentChannelMessages<ChannelMessage>(
     "ui_state",
     legacyHistoryAgentIds,
     {
       initialBefore: before,
-      agentMessageLimit,
+      agentMessageLimit: LEGACY_AGENT_MSG_LIMIT,
       fields: ["state", "doover_legacy_bridge_at"],
       liveUpdates: false,
     },
   );
-
-  const timeseriesQuery = useQuery({
-    queryKey: [
-      "farm-water-dashboard",
-      "capacity-timeseries",
-      normalHistoryAgentIds.join(","),
-      capacityFields.join(","),
-      before,
-      after,
-      agentMessageLimit,
-    ],
-    enabled: normalHistoryAgentIds.length > 0 && capacityFields.length > 0,
-    staleTime: 60_000,
-    queryFn: async () => {
-      const entries = normalHistoryAgentIds
-        .map((id) => ({ id, path: capacityPathFor(levelInstallByDevice[id] ?? null) }))
-        .filter((entry): entry is { id: string; path: string } => !!entry.path);
-
-      const pairs = await Promise.all(
-        entries.map(async ({ id, path }) => {
-          let response: DataSeriesResponse;
-          try {
-            response = (await client.messages.getTimeseries(id, "tag_values", {
-              before,
-              after,
-              limit: agentMessageLimit,
-              field_name: [path],
-            })) as DataSeriesResponse;
-          } catch {
-            return [id, []] as const;
-          }
-
-          const points = (response.results ?? [])
-            .map((result) => {
-              const value = resolveCapacityNumber(result.value, path);
-              const t =
-                toEpochMs(result.timestamp) ??
-                timestampFromSnowflake(result.message_id) ??
-                timestampFromSnowflake(result.id);
-              return value == null || t == null ? null : { t, value };
-            })
-            .filter((point): point is CapacityPoint => point != null)
-            .sort((a, b) => a.t - b.t);
-
-          return [id, points] as const;
-        }),
-      );
-
-      return Object.fromEntries(pairs) as Record<string, CapacityPoint[]>;
-    },
-  });
 
   const messageHistoryByDevice = useMemo<Record<string, CapacityPoint[]>>(() => {
     const out: Record<string, CapacityPoint[]> = {};
@@ -1407,7 +1358,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
       if (value == null || t == null) continue;
       (out[id] ??= []).push({ t, value });
     }
-    for (const id of Object.keys(out)) out[id].sort((a, b) => a.t - b.t);
+    for (const id of Object.keys(out)) out[id] = collapseRepeats(out[id].sort((a, b) => a.t - b.t));
     return out;
   }, [historyQuery.messages, levelInstallByDevice]);
 
@@ -1436,14 +1387,12 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     const ids = new Set([
       ...Object.keys(messageHistoryByDevice),
       ...Object.keys(legacyMessageHistoryByDevice),
-      ...Object.keys(timeseriesQuery.data ?? {}),
     ]);
     for (const id of ids) {
-      const normalHistory = mergeHistory(timeseriesQuery.data?.[id] ?? [], messageHistoryByDevice[id] ?? []);
-      out[id] = mergeHistory(normalHistory, legacyMessageHistoryByDevice[id] ?? []);
+      out[id] = mergeHistory(messageHistoryByDevice[id] ?? [], legacyMessageHistoryByDevice[id] ?? []);
     }
     return out;
-  }, [messageHistoryByDevice, legacyMessageHistoryByDevice, timeseriesQuery.data]);
+  }, [messageHistoryByDevice, legacyMessageHistoryByDevice]);
 
   const rows = useMemo<DeviceRow[]>(() => {
     return devices.map((device, index) => {
@@ -1597,6 +1546,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
           scaleMode={scaleMode}
           onScaleModeChange={setScaleMode}
           emptyLabel={`No capacity history yet. ${NO_DEVICES_HINT}`}
+          loading={historyLoading}
         />
 
         <DeviceTable
@@ -1618,6 +1568,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
             onDaysChange={setRangeDays}
             scaleMode={scaleMode}
             onScaleModeChange={setScaleMode}
+            historyLoading={historyLoading}
             sortKey={sortKey}
             sortDir={sortDir}
             onSort={onSort}
