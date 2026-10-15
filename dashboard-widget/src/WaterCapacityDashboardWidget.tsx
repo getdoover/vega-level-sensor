@@ -1,6 +1,6 @@
 import "./styles.css";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router";
 
@@ -50,9 +50,26 @@ const DEFAULT_HISTORY_DAYS = 7;
 const MAX_HISTORY_DAYS = 90;
 const FLEET_MSG_CEILING = 50_000;
 const DEFAULT_AGENT_MSG_LIMIT = 500;
-const VEGA_APP_NAME = "vega_level_sensor";
-const VEGA_CAPACITY_TAG = "last_volume";
-const VEGA_FULL_CAPACITY_TAG = "full_volume";
+const DEFAULT_TITLE = "Stored Water";
+const DEFAULT_UNIT = "ML";
+
+// Level apps the dashboard can read. Full capacity comes from capacityTag when
+// the app publishes one, otherwise it's derived from volume and percent full.
+interface LevelSource {
+  app: string;
+  volumeTag: string;
+  capacityTag?: string;
+  percentTag?: string;
+}
+const LEVEL_SOURCES: LevelSource[] = [
+  { app: "vega_level_sensor", volumeTag: "last_volume", capacityTag: "full_volume" },
+  { app: "agbot_device", volumeTag: "litres", percentTag: "fill_level" },
+  { app: "analog_level_sensor", volumeTag: "level_volume", percentTag: "level_filled_percentage" },
+];
+// Below this, volume / percent is too noisy to derive full capacity from.
+const MIN_PERCENT_FOR_CAPACITY = 5;
+const NO_DEVICES_HINT =
+  "Configure extended permissions for devices running Vega Level Sensor, Agbot or Analog Level Sensor.";
 const LEGACY_UI_VOLUME_PATH = "state.children.vegameterlastVolume";
 const STACK_COLORS = [
   "#2563eb",
@@ -76,13 +93,25 @@ const RANGE_OPTIONS = [
 type ScaleMode = "capacity" | "fit";
 const SCALE_OPTIONS: { label: string; mode: ScaleMode; title: string }[] = [
   { label: "Capacity", mode: "capacity", title: "Scale the axis to total storage capacity" },
-  { label: "Fit", mode: "fit", title: "Zoom the axis to the stored water level" },
+  { label: "Fit", mode: "fit", title: "Zoom the axis to the stored level" },
 ];
 const DEFAULT_SCALE_MODE: ScaleMode = "capacity";
 
 interface UiRemoteComponentWater {
   app_key: string;
 }
+
+interface LevelInstall {
+  appKey: string;
+  source: LevelSource;
+}
+
+interface Labels {
+  title: string;
+  unit: string;
+}
+
+const LabelsContext = createContext<Labels>({ title: DEFAULT_TITLE, unit: DEFAULT_UNIT });
 
 interface WaterDeviceEntry extends DeviceMapEntry {
   id: string;
@@ -103,6 +132,8 @@ interface DashboardDeploymentConfig {
     string,
     {
       default_history_days?: number | string | null;
+      title?: string | null;
+      unit?: string | null;
     }
   >;
 }
@@ -176,7 +207,7 @@ interface DeviceRow {
   displayName: string;
   deviceTypeName: string | null;
   chartColor: string;
-  vegaAppKey: string | null;
+  levelAppKey: string | null;
   legacyMarkerValue: string | null;
   capacity: number | null;
   fullCapacity: number | null;
@@ -220,32 +251,47 @@ function displayNameOf(device: WaterDeviceEntry): string {
   return device.display_name || device.name || device.id;
 }
 
-function isVegaInstall(install: NonNullable<WaterDeviceEntry["app_installs"]>[number]): boolean {
+function sourceOfInstall(install: NonNullable<WaterDeviceEntry["app_installs"]>[number]): LevelSource | null {
   const values = [install.name, install.display_name, install.application_name]
     .filter((v): v is string => typeof v === "string")
     .map((v) => v.toLowerCase());
-  return values.some(
-    (v) =>
-      v === VEGA_APP_NAME ||
-      v.startsWith(`${VEGA_APP_NAME}_`) ||
-      v.startsWith(`${VEGA_APP_NAME}-`) ||
-      v.includes("vega level sensor"),
+  return (
+    LEVEL_SOURCES.find(({ app }) =>
+      values.some(
+        (v) =>
+          v === app ||
+          v.startsWith(`${app}_`) ||
+          v.startsWith(`${app}-`) ||
+          v.includes(app.replace(/_/g, " ")),
+      ),
+    ) ?? null
   );
 }
 
-function vegaAppKeyOf(device: WaterDeviceEntry): string | null {
-  const install = device.app_installs?.find(isVegaInstall);
-  return typeof install?.name === "string" && install.name.trim()
-    ? install.name.trim()
-    : null;
+function levelInstallOf(device: WaterDeviceEntry): LevelInstall | null {
+  for (const install of device.app_installs ?? []) {
+    const source = sourceOfInstall(install);
+    const appKey = typeof install.name === "string" ? install.name.trim() : "";
+    if (source && appKey) return { appKey, source };
+  }
+  return null;
 }
 
-function capacityPathFor(appKey: string | null): string | null {
-  return appKey ? `${appKey}.${VEGA_CAPACITY_TAG}` : null;
+function capacityPathFor(install: LevelInstall | null): string | null {
+  return install ? `${install.appKey}.${install.source.volumeTag}` : null;
 }
 
-function fullCapacityPathFor(appKey: string | null): string | null {
-  return appKey ? `${appKey}.${VEGA_FULL_CAPACITY_TAG}` : null;
+function fullCapacityPathFor(install: LevelInstall | null): string | null {
+  return install?.source.capacityTag ? `${install.appKey}.${install.source.capacityTag}` : null;
+}
+
+function percentPathFor(install: LevelInstall | null): string | null {
+  return install?.source.percentTag ? `${install.appKey}.${install.source.percentTag}` : null;
+}
+
+function derivedFullCapacity(volume: number | null, percent: number | null): number | null {
+  if (volume == null || percent == null || percent < MIN_PERCENT_FOR_CAPACITY) return null;
+  return volume / (percent / 100);
 }
 
 function maxRangeBound(element: unknown): number | null {
@@ -569,15 +615,15 @@ function mergeHistory(primary: CapacityPoint[], fallback: CapacityPoint[]): Capa
   return [...byTimestamp.values()].sort((a, b) => a.t - b.t);
 }
 
-function fmtCapacity(value: number | null): string {
+function fmtCapacity(value: number | null, unit: string): string {
   if (value == null) return "-";
-  return `${Math.round(value)} ML`;
+  return `${Math.round(value).toLocaleString()} ${unit}`;
 }
 
-function fmtChange(value: number | null): string {
+function fmtChange(value: number | null, unit: string): string {
   if (value == null) return "-";
   const sign = value > 0 ? "+" : "";
-  return `${sign}${fmtCapacity(value)}`;
+  return `${sign}${fmtCapacity(value, unit)}`;
 }
 
 function fmtTime(value: number | null): string {
@@ -593,7 +639,7 @@ function percentFull(value: number | null, full: number | null): number | null {
 // Export the current storages and their levels over the selected window to a
 // multi-sheet .xlsx. xlsx is loaded on demand so it stays out of the initial
 // bundle.
-async function exportStoragesToExcel(rows: DeviceRow[], days: number): Promise<void> {
+async function exportStoragesToExcel(rows: DeviceRow[], days: number, { title, unit }: Labels): Promise<void> {
   const XLSX = await import("xlsx");
 
   const roundOrNull = (value: number | null): number | null =>
@@ -603,10 +649,10 @@ async function exportStoragesToExcel(rows: DeviceRow[], days: number): Promise<v
 
   const summaryHeader = [
     "Storage",
-    "Current Level (ML)",
-    "Full Capacity (ML)",
+    `Current Level (${unit})`,
+    `Full Capacity (${unit})`,
     "Percent Full (%)",
-    `Change over ${days}d (ML)`,
+    `Change over ${days}d (${unit})`,
     "Last Updated",
   ];
   const summaryRows = rows.map((row) => [
@@ -622,7 +668,7 @@ async function exportStoragesToExcel(rows: DeviceRow[], days: number): Promise<v
   XLSX.utils.book_append_sheet(wb, summary, "Summary");
 
   const { data, series } = buildStackedFarmData(rows, days);
-  const levelsHeader = ["Time", ...series.map((s) => `${s.name} (ML)`)];
+  const levelsHeader = ["Time", ...series.map((s) => `${s.name} (${unit})`)];
   const levelsRows = data.map((point) => [
     dayjs(num(point.t) ?? 0).format("YYYY-MM-DD HH:mm"),
     ...series.map((s) => roundOrNull(num(point[s.key]))),
@@ -631,7 +677,8 @@ async function exportStoragesToExcel(rows: DeviceRow[], days: number): Promise<v
   levels["!cols"] = [{ wch: 18 }, ...series.map(() => ({ wch: 16 }))];
   XLSX.utils.book_append_sheet(wb, levels, "Levels Over Time");
 
-  XLSX.writeFile(wb, `stored-water-${days}d-${dayjs().format("YYYYMMDD-HHmm")}.xlsx`);
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "storage";
+  XLSX.writeFile(wb, `${slug}-${days}d-${dayjs().format("YYYYMMDD-HHmm")}.xlsx`);
 }
 
 function sortRows(rows: DeviceRow[], key: SortKey, dir: SortDir): DeviceRow[] {
@@ -683,6 +730,7 @@ function CapacityChart({
     label: dayjs(p.t).format("D MMM HH:mm"),
     value: p.value,
   }));
+  const { unit } = useContext(LabelsContext);
 
   return (
     <div className="water-panel">
@@ -713,7 +761,7 @@ function CapacityChart({
               />
               <Tooltip
                 labelFormatter={(label) => dayjs(Number(label)).format("ddd, LLL")}
-                formatter={(value) => [fmtCapacity(num(value)), "Capacity"]}
+                formatter={(value) => [fmtCapacity(num(value), unit), "Capacity"]}
                 contentStyle={{
                   background: "var(--popover)",
                   border: "1px solid var(--border)",
@@ -757,6 +805,7 @@ function FarmCapacityChart({
   emptyLabel: string;
 }) {
   const { data, series } = useMemo(() => buildStackedFarmData(rows, days), [rows, days]);
+  const { unit } = useContext(LabelsContext);
 
   const totalFullCapacity = useMemo(() => {
     const total = rows.reduce((sum, row) => sum + (row.fullCapacity ?? 0), 0);
@@ -835,13 +884,13 @@ function FarmCapacityChart({
               <YAxis
                 stroke="var(--muted-foreground)"
                 tick={{ fontSize: 11 }}
-                tickFormatter={(v) => fmtCapacity(num(v))}
+                tickFormatter={(v) => fmtCapacity(num(v), unit)}
                 domain={[0, yMax]}
-                width={52}
+                width={64}
               />
               <Tooltip
                 labelFormatter={(label) => dayjs(Number(label)).format("ddd, LLL")}
-                formatter={(value, name) => [fmtCapacity(num(value)), name]}
+                formatter={(value, name) => [fmtCapacity(num(value), unit), name]}
                 contentStyle={{
                   background: "var(--popover)",
                   border: "1px solid var(--border)",
@@ -858,7 +907,7 @@ function FarmCapacityChart({
                   strokeWidth={1.5}
                   ifOverflow={scaleMode === "capacity" ? "extendDomain" : "hidden"}
                   label={{
-                    value: `Total capacity ${fmtCapacity(totalFullCapacity)}`,
+                    value: `Total capacity ${fmtCapacity(totalFullCapacity, unit)}`,
                     position: "insideTopRight",
                     fill: "var(--muted-foreground)",
                     fontSize: 11,
@@ -890,8 +939,9 @@ function FarmCapacityChart({
 function Summary({ rows, farmSeries }: { rows: DeviceRow[]; farmSeries: CapacityPoint[] }) {
   const latestFarm = farmSeries.length ? farmSeries[farmSeries.length - 1].value : null;
   const currentTotal = rows.reduce((sum, r) => sum + chartCapacity(r.capacity), 0);
-  const hasConfiguredDevice = rows.some((r) => r.vegaAppKey || r.legacyMarkerValue);
+  const hasConfiguredDevice = rows.some((r) => r.levelAppKey || r.legacyMarkerValue);
   const shownTotal = latestFarm ?? (hasConfiguredDevice ? currentTotal : null);
+  const { title, unit } = useContext(LabelsContext);
 
   return (
     <div className="water-summary">
@@ -899,7 +949,7 @@ function Summary({ rows, farmSeries }: { rows: DeviceRow[]; farmSeries: Capacity
         Storages <strong>{rows.length}</strong>
       </span>
       <span className="water-chip">
-        Stored water <strong>{fmtCapacity(shownTotal)}</strong>
+        {title} <strong>{fmtCapacity(shownTotal, unit)}</strong>
       </span>
     </div>
   );
@@ -914,6 +964,7 @@ function FillBar({
   full: number | null;
   color: string;
 }) {
+  const { unit } = useContext(LabelsContext);
   if (full == null || full <= 0 || value == null) {
     return <span className="water-muted">Capacity unknown</span>;
   }
@@ -921,7 +972,7 @@ function FillBar({
   return (
     <span
       className="water-fillbar"
-      title={`${pct.toFixed(0)}% full (${fmtCapacity(value)} of ${fmtCapacity(full)})`}
+      title={`${pct.toFixed(0)}% full (${fmtCapacity(value, unit)} of ${fmtCapacity(full, unit)})`}
     >
       <span className="water-fillbar-track">
         <span
@@ -947,6 +998,7 @@ function DeviceTable({
   onSort: (key: SortKey) => void;
   onOpen: (row: DeviceRow) => void;
 }) {
+  const { unit } = useContext(LabelsContext);
   return (
     <div className="water-panel">
       <div className="water-panel-header">
@@ -956,7 +1008,7 @@ function DeviceTable({
         <table className="water-table">
           <thead>
             <tr>
-              <SortHeader label="Dam / Device" sortKey="name" current={sortKey} dir={sortDir} onSort={onSort} />
+              <SortHeader label="Storage" sortKey="name" current={sortKey} dir={sortDir} onSort={onSort} />
               <SortHeader label="Level / Capacity" sortKey="capacity" current={sortKey} dir={sortDir} onSort={onSort} />
               <SortHeader label="Change" sortKey="change" current={sortKey} dir={sortDir} onSort={onSort} />
               <SortHeader label="Updated" sortKey="lastUpdated" current={sortKey} dir={sortDir} onSort={onSort} />
@@ -966,7 +1018,7 @@ function DeviceTable({
             {rows.length === 0 ? (
               <tr>
                 <td className="water-empty" colSpan={4}>
-                  No devices found. Configure extended permissions for devices running Vega Level Sensor.
+                  No devices found. {NO_DEVICES_HINT}
                 </td>
               </tr>
             ) : (
@@ -982,13 +1034,13 @@ function DeviceTable({
                     </span>
                   </td>
                   <td className="water-level-cell">
-                    {fmtCapacity(row.capacity)}
+                    {fmtCapacity(row.capacity, unit)}
                     {row.fullCapacity != null && (
-                      <span className="water-capacity-secondary"> / {fmtCapacity(row.fullCapacity)}</span>
+                      <span className="water-capacity-secondary"> / {fmtCapacity(row.fullCapacity, unit)}</span>
                     )}
                   </td>
                   <td className={row.change != null && row.change < 0 ? "water-negative" : "water-positive"}>
-                    {fmtChange(row.change)}
+                    {fmtChange(row.change, unit)}
                   </td>
                   <td title={row.lastUpdated ? dayjs(row.lastUpdated).format("ddd, LLL") : undefined}>
                     {fmtTime(row.lastUpdated)}
@@ -1012,6 +1064,7 @@ function DeviceQuickView({
   days: number;
   onClose: () => void;
 }) {
+  const { unit } = useContext(LabelsContext);
   if (!row) return null;
 
   return createPortal(
@@ -1033,12 +1086,12 @@ function DeviceQuickView({
         <div className="water-detail-stats">
           <div className="water-stat">
             <span>Level</span>
-            <strong>{fmtCapacity(row.capacity)}</strong>
+            <strong>{fmtCapacity(row.capacity, unit)}</strong>
           </div>
           <div className="water-stat">
             <span>Change</span>
             <strong className={row.change != null && row.change < 0 ? "water-negative" : "water-positive"}>
-              {fmtChange(row.change)}
+              {fmtChange(row.change, unit)}
             </strong>
           </div>
           <div className="water-stat">
@@ -1050,7 +1103,7 @@ function DeviceQuickView({
         <CapacityChart
           title={`${row.displayName} Capacity`}
           points={filterPoints(row.history, days)}
-          emptyLabel="No capacity history for this dam/device yet."
+          emptyLabel="No capacity history for this storage yet."
         />
 
         <div className="water-detail-actions">
@@ -1092,6 +1145,7 @@ function FullscreenDialog({
   onOpen: (row: DeviceRow) => void;
   onClose: () => void;
 }) {
+  const labels = useContext(LabelsContext);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -1105,7 +1159,7 @@ function FullscreenDialog({
       <div className="water-fullscreen-header">
         <div>
           <h2 id="water-fullscreen-title" className="water-dialog-title">
-            Stored Water
+            {labels.title}
           </h2>
           <div className="water-muted">Fleet storage overview</div>
         </div>
@@ -1114,7 +1168,7 @@ function FullscreenDialog({
             className="water-button"
             type="button"
             onClick={() => {
-              void exportStoragesToExcel(rows, days).catch((error) => {
+              void exportStoragesToExcel(rows, days, labels).catch((error) => {
                 console.error("Failed to export storages to Excel", error);
               });
             }}
@@ -1133,13 +1187,13 @@ function FullscreenDialog({
       <div className="water-fullscreen-content">
         <Summary rows={rows} farmSeries={farmSeries} />
         <FarmCapacityChart
-          title="Stored Water"
+          title={labels.title}
           rows={rows}
           days={days}
           onDaysChange={onDaysChange}
           scaleMode={scaleMode}
           onScaleModeChange={onScaleModeChange}
-          emptyLabel="No capacity history yet. Configure extended permissions for devices running Vega Level Sensor."
+          emptyLabel={`No capacity history yet. ${NO_DEVICES_HINT}`}
         />
         <DeviceTable
           rows={tableRows}
@@ -1169,6 +1223,13 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     MAX_HISTORY_DAYS,
     Math.max(1, num(dashboardConfig.default_history_days) ?? DEFAULT_HISTORY_DAYS),
   );
+  const labels = useMemo<Labels>(
+    () => ({
+      title: dashboardConfig.title?.trim() || DEFAULT_TITLE,
+      unit: dashboardConfig.unit?.trim() || DEFAULT_UNIT,
+    }),
+    [dashboardConfig.title, dashboardConfig.unit],
+  );
 
   const [rangeDays, setRangeDays] = useState(configuredDays);
   useEffect(() => setRangeDays(configuredDays), [configuredDays]);
@@ -1181,19 +1242,22 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
   );
   const deviceIds = useMemo(() => devices.map((d) => d.id), [devices]);
 
-  const vegaAppKeyByDevice = useMemo<Record<string, string>>(() => {
-    const out: Record<string, string> = {};
+  const levelInstallByDevice = useMemo<Record<string, LevelInstall>>(() => {
+    const out: Record<string, LevelInstall> = {};
     for (const d of devices) {
-      const appKey = vegaAppKeyOf(d);
-      if (appKey) out[d.id] = appKey;
+      const install = levelInstallOf(d);
+      if (install) out[d.id] = install;
     }
     return out;
   }, [devices]);
 
-  const fieldRoots = useMemo(() => [...new Set(Object.values(vegaAppKeyByDevice))], [vegaAppKeyByDevice]);
+  const fieldRoots = useMemo(
+    () => [...new Set(Object.values(levelInstallByDevice).map((i) => i.appKey))],
+    [levelInstallByDevice],
+  );
   const capacityFields = useMemo(
-    () => [...new Set(Object.values(vegaAppKeyByDevice).map((appKey) => capacityPathFor(appKey)).filter((v): v is string => !!v))],
-    [vegaAppKeyByDevice],
+    () => [...new Set(Object.values(levelInstallByDevice).map((i) => capacityPathFor(i)).filter((v): v is string => !!v))],
+    [levelInstallByDevice],
   );
 
   const { aggregatesByAgent: allTagAggregatesByAgent, query: allTagAggregateQuery } =
@@ -1242,8 +1306,8 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     [fleetTop],
   );
   const normalHistoryAgentIds = useMemo(
-    () => devices.filter((d) => vegaAppKeyByDevice[d.id]).map((d) => d.id),
-    [devices, vegaAppKeyByDevice],
+    () => devices.filter((d) => levelInstallByDevice[d.id]).map((d) => d.id),
+    [devices, levelInstallByDevice],
   );
   const legacyHistoryAgentIds = useMemo(
     () => devices.filter((d) => legacyMarkerByDevice[d.id]).map((d) => d.id),
@@ -1294,7 +1358,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     staleTime: 60_000,
     queryFn: async () => {
       const entries = normalHistoryAgentIds
-        .map((id) => ({ id, path: capacityPathFor(vegaAppKeyByDevice[id] ?? null) }))
+        .map((id) => ({ id, path: capacityPathFor(levelInstallByDevice[id] ?? null) }))
         .filter((entry): entry is { id: string; path: string } => !!entry.path);
 
       const pairs = await Promise.all(
@@ -1336,7 +1400,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     for (const message of historyQuery.messages ?? []) {
       const id = message.channel?.agent_id == null ? null : String(message.channel.agent_id);
       if (!id) continue;
-      const path = capacityPathFor(vegaAppKeyByDevice[id] ?? null);
+      const path = capacityPathFor(levelInstallByDevice[id] ?? null);
       if (!path) continue;
       const value = resolveCapacityNumber(message.data, path);
       const t = toEpochMs(message.timestamp) ?? timestampFromSnowflake(message.id);
@@ -1345,7 +1409,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     }
     for (const id of Object.keys(out)) out[id].sort((a, b) => a.t - b.t);
     return out;
-  }, [historyQuery.messages, vegaAppKeyByDevice]);
+  }, [historyQuery.messages, levelInstallByDevice]);
 
   const legacyMessageHistoryByDevice = useMemo<Record<string, CapacityPoint[]>>(() => {
     const out: Record<string, CapacityPoint[]> = {};
@@ -1383,18 +1447,22 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
 
   const rows = useMemo<DeviceRow[]>(() => {
     return devices.map((device, index) => {
-      const vegaAppKey = vegaAppKeyByDevice[device.id] ?? null;
+      const levelInstall = levelInstallByDevice[device.id] ?? null;
       const legacyMarker = legacyMarkerByDevice[device.id] ?? null;
       const legacyUiCapacity = legacyUiCapacityByDevice[device.id];
-      const path = capacityPathFor(vegaAppKey);
+      const path = capacityPathFor(levelInstall);
       const aggregate = aggregatesByAgent[device.id];
       const uiStateAggregate = uiStateByAgent[device.id];
       const current =
         resolveCapacityNumber(aggregate?.data, path) ??
         (legacyMarker ? legacyUiCapacity?.value ?? null : null);
+      const fullCapacityPath = fullCapacityPathFor(levelInstall);
+      // The UI-gauge fallback only applies to apps with a capacity tag (Vega);
+      // percent-based apps' gauges top out at 100%, not the tank volume.
       const fullCapacity =
-        resolveCapacityNumber(aggregate?.data, fullCapacityPathFor(vegaAppKey)) ??
-        fullVolumeFromUiState(uiStateAggregate?.data, vegaAppKey) ??
+        resolveCapacityNumber(aggregate?.data, fullCapacityPath) ??
+        derivedFullCapacity(current, resolveCapacityNumber(aggregate?.data, percentPathFor(levelInstall))) ??
+        (fullCapacityPath ? fullVolumeFromUiState(uiStateAggregate?.data, levelInstall?.appKey ?? null) : null) ??
         (legacyMarker ? legacyUiCapacity?.fullCapacity ?? null : null);
       const history = historyByDevice[device.id] ?? [];
       const lastHistoryPoint = history.length ? history[history.length - 1] : null;
@@ -1414,7 +1482,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
         displayName: displayNameOf(device),
         deviceTypeName: device.type?.name ?? null,
         chartColor: STACK_COLORS[index % STACK_COLORS.length],
-        vegaAppKey,
+        levelAppKey: levelInstall?.appKey ?? null,
         legacyMarkerValue: legacyMarker?.value ?? null,
         capacity: rawCapacity == null ? null : Math.max(0, rawCapacity),
         fullCapacity,
@@ -1425,7 +1493,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
     });
   }, [
     devices,
-    vegaAppKeyByDevice,
+    levelInstallByDevice,
     legacyMarkerByDevice,
     legacyUiCapacityByDevice,
     aggregatesByAgent,
@@ -1481,7 +1549,7 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
   const [fullscreen, setFullscreen] = useState(false);
 
   const handleExport = () => {
-    void exportStoragesToExcel(rows, rangeDays).catch((error) => {
+    void exportStoragesToExcel(rows, rangeDays, labels).catch((error) => {
       console.error("Failed to export storages to Excel", error);
     });
   };
@@ -1494,69 +1562,71 @@ function WaterCapacityDashboardWidgetInner({ uiElement }: { uiElement: UiRemoteC
   }
 
   return (
-    <div className="water-dashboard">
-      <div className="water-header">
-        <Summary rows={rows} farmSeries={farmSeries} />
-        <div className="water-actions">
-          <button
-            className="water-button"
-            type="button"
-            onClick={handleExport}
-            disabled={rows.length === 0}
-            title="Export to Excel"
-            aria-label="Export storages to Excel"
-          >
-            <Download size={14} />
-          </button>
-          <button
-            className="water-button"
-            type="button"
-            onClick={() => setFullscreen(true)}
-            title="Expand"
-            aria-label="Open fullscreen dashboard"
-          >
-            <Maximize2 size={14} />
-          </button>
+    <LabelsContext.Provider value={labels}>
+      <div className="water-dashboard">
+        <div className="water-header">
+          <Summary rows={rows} farmSeries={farmSeries} />
+          <div className="water-actions">
+            <button
+              className="water-button"
+              type="button"
+              onClick={handleExport}
+              disabled={rows.length === 0}
+              title="Export to Excel"
+              aria-label="Export storages to Excel"
+            >
+              <Download size={14} />
+            </button>
+            <button
+              className="water-button"
+              type="button"
+              onClick={() => setFullscreen(true)}
+              title="Expand"
+              aria-label="Open fullscreen dashboard"
+            >
+              <Maximize2 size={14} />
+            </button>
+          </div>
         </div>
-      </div>
 
-      <FarmCapacityChart
-        title="Stored Water"
-        rows={rows}
-        days={rangeDays}
-        onDaysChange={setRangeDays}
-        scaleMode={scaleMode}
-        onScaleModeChange={setScaleMode}
-        emptyLabel="No capacity history yet. Configure extended permissions for devices running Vega Level Sensor."
-      />
-
-      <DeviceTable
-        rows={sortedRows}
-        sortKey={sortKey}
-        sortDir={sortDir}
-        onSort={onSort}
-        onOpen={openDetail}
-      />
-
-      <DeviceQuickView row={detailRow} days={rangeDays} onClose={closeDetail} />
-
-      {fullscreen && (
-        <FullscreenDialog
+        <FarmCapacityChart
+          title={labels.title}
           rows={rows}
-          tableRows={sortedRows}
-          farmSeries={farmSeries}
           days={rangeDays}
           onDaysChange={setRangeDays}
           scaleMode={scaleMode}
           onScaleModeChange={setScaleMode}
+          emptyLabel={`No capacity history yet. ${NO_DEVICES_HINT}`}
+        />
+
+        <DeviceTable
+          rows={sortedRows}
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={onSort}
           onOpen={openDetail}
-          onClose={() => setFullscreen(false)}
         />
-      )}
-    </div>
+
+        <DeviceQuickView row={detailRow} days={rangeDays} onClose={closeDetail} />
+
+        {fullscreen && (
+          <FullscreenDialog
+            rows={rows}
+            tableRows={sortedRows}
+            farmSeries={farmSeries}
+            days={rangeDays}
+            onDaysChange={setRangeDays}
+            scaleMode={scaleMode}
+            onScaleModeChange={setScaleMode}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={onSort}
+            onOpen={openDetail}
+            onClose={() => setFullscreen(false)}
+          />
+        )}
+      </div>
+    </LabelsContext.Provider>
   );
 }
 

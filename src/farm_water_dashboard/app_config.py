@@ -26,6 +26,18 @@ class FarmWaterDashboardConfig(config.Schema):
         description="Default period shown in the farm and dam/device capacity graphs.",
     )
 
+    title = config.String(
+        "Title",
+        default="Stored Water",
+        description="Heading for the dashboard, e.g. Stored Water or Stored Diesel.",
+    )
+
+    unit = config.String(
+        "Unit",
+        default="ML",
+        description="Volume unit label. Must match the devices' volume tags: ML for Vega, L for Agbot and Analog Level Sensor.",
+    )
+
     position = config.ApplicationPosition()
 
 
