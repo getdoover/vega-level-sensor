@@ -1,6 +1,5 @@
 {
     "vega_level_sensor": {
-        "id": 144019800371283464,
         "name": "vega_level_sensor",
         "display_name": "Vega Level Sensor",
         "type": "DEV",
@@ -16,13 +15,9 @@
         "organisation_id": null,
         "image_name": "registry.doover.com/apps/vega_level_sensor:main",
         "build_args": "--platform linux/amd64,linux/arm64",
-        "export_ui_command": "export-ui",
-        "staging_config": {
-            "id": 170664422157625614
-        }
+        "export_ui_command": "export-ui"
     },
     "farm_water_dashboard": {
-        "id": 192159133695276553,
         "name": "farm_water_dashboard",
         "display_name": "Farm Water Dashboard",
         "type": "PRO",
@@ -33,7 +28,7 @@
         "depends_on": [],
         "organisation_id": null,
         "widget": "dashboard-widget/assets/WaterCapacityDashboardWidget.js",
-        "build_widget_command": "npm --prefix dashboard-widget run build",
+        "build_widget_command": "npm --prefix dashboard-widget install && npm --prefix dashboard-widget run build",
         "export_config_command": "export-config-dashboard",
         "export_ui_command": "export-ui-dashboard",
         "lambda_config": {
